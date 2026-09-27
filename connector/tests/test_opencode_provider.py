@@ -148,6 +148,28 @@ def test_capabilities_are_never_hardcoded_when_the_runtime_cannot_do_them() -> N
     assert descriptor.metadata["readOnly"] is True
 
 
+def test_the_real_capability_rows_survive_the_provider_derivation() -> None:
+    # The fakes above hand-write `allowed`, which is exactly what hid the bug the
+    # first live Hub round-trip found: rows without `supported`/`available`/
+    # `allowed` read as "off" to `opencode_capabilities` while the attached
+    # runtime still served them, so the descriptor advertised an OpenCode runtime
+    # with no model catalog and no way to send a message.
+    from connector.runtimes.opencode import provider_config
+    from connector.runtimes.opencode.serve.runtime import capability_rows
+
+    rows = capability_rows("/work/repo")
+    capabilities = provider_config.opencode_capabilities({"capabilities": rows})
+    for key in ("modelCatalog", "sessionDiscovery", "startTurn", "interruptTurn", "commands", "interactions", "sessionSnapshot"):
+        assert capabilities.get(key) is True, (key, capabilities)
+    for key in ("permissionCatalog", "steerTurn", "attachments"):
+        assert capabilities[key] is False, key
+    discovery = next(row for row in rows if row["capabilityId"] == "session.discovery")
+    assert discovery["metadata"] == {"discoveryState": "complete"}
+    unloaded = next(row for row in capability_rows("/work/repo", loaded=False) if row["capabilityId"] == "session.discovery")
+    assert unloaded["available"] is False and unloaded["metadata"] == {"discoveryState": "partial"}
+    assert "not loaded" in (unloaded["reason"] or "")
+
+
 def test_unavailable_discovery_keeps_the_actionable_reason() -> None:
     provider = provider_with(fake_discovery(available=False, reason=serve_discovery.UNAVAILABLE_REASON))
 

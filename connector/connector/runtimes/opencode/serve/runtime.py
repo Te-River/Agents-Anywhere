@@ -130,7 +130,13 @@ CAPABILITY_ROWS: tuple[dict[str, Any], ...] = (
 
 
 def capability_rows(directory: str | None, *, loaded: bool = True) -> list[dict[str, Any]]:
-    """Wire-form capability rows, with discovery state derived from the location.
+    """Complete wire-form capability rows -- both consumers read exactly these keys.
+
+    Every row carries `supported`/`available`/`allowed`: the provider derives its
+    descriptor booleans from all three (`provider_config.opencode_capabilities`),
+    so a row that omits one reads as "off" there while the attached runtime would
+    still serve it. That mismatch is what made a live Hub show an OpenCode runtime
+    with no model catalog and no way to send a message.
 
     rev3 ruling 2: the discovery state rides this row's metadata and is never a
     new boolean. The host service answers `GET /api/session` with a paginated
@@ -138,7 +144,17 @@ def capability_rows(directory: str | None, *, loaded: bool = True) -> list[dict[
     `complete` -- claiming that for a location the service has never opened, or
     with no location at all, would overstate what one instance can see.
     """
-    rows = [dict(row) for row in CAPABILITY_ROWS]
+    rows = [
+        {
+            "capabilityId": row["capabilityId"],
+            "supported": bool(row.get("supported", True)),
+            "available": bool(row.get("available", True)),
+            "allowed": bool(row.get("supported", True)) and bool(row.get("available", True)),
+            "reason": row.get("reason"),
+            "metadata": dict(row.get("metadata") or {}),
+        }
+        for row in CAPABILITY_ROWS
+    ]
     available = bool(directory) and loaded
     if not directory:
         reason = "no location configured for this instance"
@@ -151,6 +167,7 @@ def capability_rows(directory: str | None, *, loaded: bool = True) -> list[dict[
             "capabilityId": "session.discovery",
             "supported": True,
             "available": available,
+            "allowed": available,
             "reason": reason,
             "metadata": {"discoveryState": "complete" if available else "partial"},
         }
