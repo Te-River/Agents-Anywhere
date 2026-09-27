@@ -226,9 +226,11 @@ class OpenCodeServiceRuntime(AgentRuntime):
 
     @property
     def sync_mode(self) -> str:
-        # The host service is polled and event-streamed from one place; there is
-        # no per-session relay channel to negotiate.
-        return "events"
+        # "events" tells the Connector "this runtime pushes its own updates", and
+        # the polling scanner then skips it entirely -- with no event pump here,
+        # that meant zero sessions ever reached the Hub. Report "polling" until
+        # `/api/event` is actually wired up.
+        return "polling"
 
     @property
     def identity(self) -> RuntimeIdentity:
@@ -732,6 +734,12 @@ class OpenCodeServiceRuntime(AgentRuntime):
         client = self._client
         if client is None:
             raise OpenCodeServiceUnavailable("not attached to an OpenCode service")
+        if self.directory and self._resolved_directory is None:
+            # The host opens and closes locations as it works, so a location that
+            # happened to be closed at attach time must not stay invisible for the
+            # rest of the instance's life: retry, cheaply, on every read.
+            with suppress(OpenCodeServiceError, OpenCodeServiceUnavailable, OSError, ValueError):
+                self._resolved_directory = await self._resolve_directory(client)
         return client
 
     def _location_params(self) -> dict[str, str]:

@@ -199,6 +199,41 @@ def test_an_unloaded_but_real_location_runs_and_reports_partial_discovery(tmp_pa
     assert after == (True, {"discoveryState": "complete"}, True), "the create response taught us the host's spelling"
 
 
+def test_a_location_the_host_opens_later_is_picked_up_without_a_restart(tmp_path) -> None:
+    # The host closes and reopens locations as it works. Resolving once at attach
+    # pinned such an instance to `partial` discovery and an empty inventory
+    # forever, which is what a live Hub showed while the same service answered
+    # 83 sessions for the very same path.
+    location = str(tmp_path / "project")
+    Path(location).mkdir()
+    loaded: list[dict[str, Any]] = [{"directory": str(tmp_path / "other")}]
+    routes = dict(BASE_ROUTES)
+    routes[("GET", "/api/debug/location")] = loaded
+    routes[("GET", "/api/session")] = [
+        {"id": EXTERNAL, "location": {"directory": location}, "time": {"updated": 10}},
+        {"id": "ses_foreign", "location": {"directory": str(tmp_path / "other")}, "time": {"updated": 20}},
+    ]
+    runtime, _ = build(routes, values={"location": location})
+
+    async def scenario() -> Any:
+        await runtime.start()
+        before = await runtime.get_runtime_capabilities()
+        while_unresolved = await runtime.list_complete_session_inventory()
+        loaded.clear()
+        loaded.append({"directory": location})
+        after = await runtime.get_runtime_capabilities()
+        return before, while_unresolved, after
+
+    before, while_unresolved, after = run(scenario())
+    row_before = next(item for item in before.capabilities if item.capability_id == "session.discovery")
+    row_after = next(item for item in after.capabilities if item.capability_id == "session.discovery")
+    assert (row_before.available, row_before.metadata["discoveryState"]) == (False, "partial")
+    # Unresolved is reported as partial, and the row-level location check is what
+    # still keeps another project's sessions out.
+    assert [row.external_session_id for row in while_unresolved] == [EXTERNAL]
+    assert (row_after.available, row_after.metadata["discoveryState"]) == (True, "complete")
+
+
 def test_an_empty_success_body_is_not_read_as_an_outage() -> None:
     # `/model`, `/agent`, `/command` and `DELETE /api/session/{id}` all answer
     # with no body; parsing that as JSON used to raise "service unreachable".
