@@ -20,6 +20,29 @@
 
 > 注（A10 TUI 面收尾轮，实测快照）：本轮 `corepack yarn typecheck` 报 **1 处错误**，`corepack yarn test` 报 `tests 264 · pass 257 · fail 5`——**全部落在 `src/server/onboarding.ts` 与其测试 `tests/unit/onboarding-env.test.ts`**（另有并行任务正在改这些文件，属在飞状态，**非 TUI 回归**）：tsc 唯一错误 `src/server/onboarding.ts:556 TS18047: 'gate' is possibly 'null'`；5 个失败全为 `onboarding-env.test.ts` 的 Connector 复用/能力判定用例。TUI 自身零回归：`npx tsc -p tsconfig.tui.json` 的唯一输出即上述同一 server 错误（`src/tui/**` 自身无错误）；`tests/unit/tui-commands.test.ts` + `tui-entry-shim.test.ts` = **13 passed / 0 fail**；`corepack yarn build` 与 `corepack yarn check:build` 均通过（`EXIT=0`）。
 
+> 注（构建漂移轮，实测快照）：真机上「服务端 available 永远停在 `starting`」的**直接原因是构建漂移**，不是上一轮记的「`duplicate model id` 毒消息卡住通知泵」——`connector/connector/runtimes/opencode/runtime.py` 在 11:22 拿到 events 分支的 `runtime_health_update("running")`，但之后没再跑 `yarn build`，`lib/connector/` 里跑的那份副本仍只有 `else` 分支（全包只有 1 处该调用；重建后为 2 处）。上一轮据以宣布「新代码确实进了包」的那条 `Select-String` 命中的正是 `else` 分支的旧行 —— **判据没验过就用，比没证据更糟**。同轮 `corepack yarn check` 实跑：`EXIT=0`，`tests 319 · pass 317 · fail 0 · skipped 2`。改 `../connector` 之后同样必须先 `yarn build`，否则 `check:build` 会报漂移（这条门是有效的，本轮就是被它抓住的）。
+
+### 宿主 HTTP 面（`opencode serve`）——判定"能不能不写插件"用
+
+只读实测，用隔离配置与数据目录，不碰用户 `~/.config/opencode`、不建真实凭据、不打模型：
+
+```bash
+CLI="$LOCALAPPDATA/Programs/@opencode-aidesktop/resources/opencode-cli.exe"   # opencode v2.0.18
+ROOT=/tmp/aa-serve-probe; PROJ="$ROOT/proj"; PORT=14098
+mkdir -p "$ROOT"/{config,data,state,cache} "$PROJ"; cd "$PROJ"
+OPENCODE_CONFIG_DIR="$ROOT/config" XDG_DATA_HOME="$ROOT/data" \
+XDG_STATE_HOME="$ROOT/state" XDG_CACHE_HOME="$ROOT/cache" \
+  "$CLI" serve --port "$PORT" > "$ROOT/serve.log" 2>&1 &
+PW=$(sed -n 's/.*server password //p' "$ROOT/serve.log" | head -1)         # 启动即打印
+DIRH="x-opencode-directory: $(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$PROJ")"
+curl -s -u "opencode:$PW" -H "$DIRH" "http://127.0.0.1:$PORT/api/session" | head -c 200
+curl -s -u "opencode:$PW" -H "$DIRH" "http://127.0.0.1:$PORT/api/model" | head -c 200
+# 路由存在性逐个取码（404 = 不存在）：/api/session/{id}/children /api/doc /api/health /api/question/request
+# 子会话归属：POST /api/session {"title":..,"parentID":..} 后回读列表与详情，看 parentID 是否出现
+```
+
+**判据自身的坑**：不带 `x-opencode-directory` 时**每一条路径**都返回 `200 + Web UI 的 HTML`，包括 `/api/health`。用它测"路由在不在"必然得出"全都在"的错误结论——必须先看 `content-type` 是不是 JSON。
+
 ## 二、已验证项（附证据）
 
 | 项 | 证据 |
@@ -47,13 +70,17 @@
 | 事件名以运行时刻为准（类型定义 0 命中） | `opencode-p0/01` §3.4 量化表 |
 | 授权页「拉起默认浏览器」：不硬编码浏览器/ProgID、URL 原样传递、失败回退且 fail-soft | `src/server/browser-opener.ts`（argv 直传：win32 `rundll32.exe url.dll,FileProtocolHandler <url>` → 回退 `explorer.exe <url>`；darwin `open`；linux `xdg-open`；全程不经 shell）；守护测试 `tests/unit/browser-opener.test.ts`：断言命令行不含 `edge\|chrome\|firefox\|iexplore\|msedge\|MSEdgeHTM\|ChromeHTML`，且含 `&` 与 `%` 的授权 URL 逐字符原样传入 |
 
+| **宿主自带 HTTP 面（`opencode serve`）实测存在**：`GET /api/session`（`{data,cursor}` 分页）、`/api/session/{id}`、`/api/session/{id}/message`、`/api/session/{id}/permission`、`/api/permission/request`、`/api/model`、`/api/provider`、`/api/agent`、`/api/command`、`/api/integration`、`/api/config`、`/api/location`、`/api/event`（SSE，`server.connected` + heartbeat） | 本轮隔离实测（复现命令见 §五「宿主 HTTP 面」）；`opencode v2.0.18`。需要 Basic（`opencode:<serve 日志里的 server password>`）**且**带 `x-opencode-directory: <encodeURIComponent(目录)>`；不带该头时所有路径回落到 Web UI 的 HTML，**任何"200 即存在"的判据都是假信号**（本轮第一次实测就中了这一枪） |
+| **`/api/model` 每条自带 `providerID`**（键：`id,modelID,providerID,family,name,compatibility,package,settings,capabilities,variants,time,cost,status,enabled,limit`） | 同上。⇒ 从 HTTP 面组目录时按 `providerID/modelID` 组键，本不需要插件 `#listModels` 那个"同 id 塌缩"补丁；塌缩只是 `ctx.model` 这一面的补偿 |
+| `/api/health`、`/api/doc`、`/api/question/request`、`/api/session/{id}/children`、`/api/session/{id}/fork` 在 2.0.18 **不存在**（404） | 同上（逐条取 HTTP 码） |
+
 ## 三、未验证项（附原因）
 
 | 项 | 原因 | 依据 |
 | --- | --- | --- |
 | **桌面 App 的 TUI（用户实际宿主）装载与可用面** | 不可干扰 PID 9016（用户服务），该宿主未实跑；其 role=cli context 可能比 CLI 更丰富，属**未证**。CLI 侧已证实：全量 `opencode` 装载、`mini` 不加载、`/aa` 命令**不存在**（无注册面） | `opencode-tui-pty/01` §3/§4/§5、§7④ |
 | **`keymap.layer` 的可写性与入参形状** | 该成员在 A10 的真实 ctx 里**存在**（属 `keymap` 成员表），但其可写性/参数形状**未在真机确认**；本轮按「是函数才尝试调用、否则静默 `none`」实现，未验证注册是否成功 | `src/tui/index.ts:registerCommandLayer`；`tests/unit/tui-commands.test.ts`；`opencode-tui-pty/01` §4 |
-| `api.client.session.list` 是否真的返回 `parentID` | 该调用只在真机 TUI（`role=cli`）运行时发生，本沙箱跑不起来 | `probe/01` §A10；`subagent/02` §5 |
+| **已结案（实测，判词为否）：`parentID` 在 2.0.18 的 HTTP 面同样不暴露** | `GET /api/session` 列表与 `GET /api/session/{id}` 详情只有 `id,projectID,cost,tokens,time,title,location`；`POST /api/session` 带 `parentID` 被接受但**静默忽略**；`/api/session/{id}/children` = 404。⇒ 这条不是"插件落点选错"，换成宿主自带服务面也拿不到子会话归属，插件侧 fail-closed 属宿主边界 | 本轮隔离实测（§五「宿主 HTTP 面」）；`subagent/02` §5 |
 | 子会话内 `permission.asked` 的 sessionID 归属 | 需真实模型跑一次工具；子会话需 `task` 工具派生 ⇒ 需可用模型 | `subagent/02` §5、§6 |
 | `ctx.session.{create,prompt,interrupt,switchModel,switchAgent}` 的真实入参形状 | `create({parentID})` 三种入参形状均被忽略（落库 `parent_id` 为 NULL），其余方法入参未逐个实测 | `subagent/02` §4.1、§4.6 |
 | A11：permission hook 返回字符串能否改写 `effect` | spike 未冒险自动放行，只证 `undefined` 不改变 effect | `p0/01` §4「未测：返回 allow/deny 字符串能否改写 effect」 |
