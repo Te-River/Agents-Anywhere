@@ -87,6 +87,12 @@ class OpenCodeServerClient:
                 response.text[:200],
                 status=response.status_code,
             )
+        if not response.content:
+            # Several write endpoints (`/model`, `/agent`, `/command`,
+            # `DELETE /api/session/{id}`) answer 200 with an empty body. Parsing
+            # that as JSON failed and the call was reported as "service
+            # unreachable" -- so every selection change looked like an outage.
+            return None
         try:
             payload = response.json()
         except (json.JSONDecodeError, ValueError) as error:

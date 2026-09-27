@@ -49,9 +49,11 @@ Agents Anywhere 侧对端中转」这一形态决策的判据来源；插件侧�
 | `GET /api/session?directory=D:/Github/Agents-Anywhere` | 83 条 ⇒ 分隔符 `/` 与 `\` 等价 |
 | `GET /api/session?directory=d:/github/agents-anywhere` | **0 条** ⇒ **大小写敏感**：用户手输的小写路径看着像"这个项目没有会话" |
 | `GET /api/session?directory=D:\Github\Agents-Anywhere\connector` | 0 条 ⇒ 不是前缀/子树匹配，只认精确目录 |
-| `GET /api/session?directory=nope` | **HTTP 500**（空体）⇒ 完全未知的路径不是空集合，是服务端错误 |
-| `GET /api/debug/location` | `{"data":[{"directory":…}, …]}`，实测列出实例已加载的 2 个目录 |
+| `GET /api/session?directory=<存在但宿主没打开过的绝对路径>` | 0 条 ⇒ "未加载" 与 "没有会话" 在这一层同形 |
+| `GET /api/session?directory=nope`（非绝对路径） | **HTTP 500**（空体）⇒ 只有相对/畸形值才是服务端错误 |
+| `GET /api/debug/location` | `{"data":[{"directory":…}, …]}`，实测列出实例已加载的 2 个目录；`POST /api/session` 带新 `location` 后会**多出一条** ⇒ 宿主是按需加载位置的 |
 | `GET /api/mcp` | 回包 `location.directory` 是 `C:\Users\34296`，**不是**请求头里给的值 |
+| `GET /api/session`（不带参数，limit=200） | **269 条、跨 28 个目录** ⇒ 一台机器一个服务，不做 location 过滤就会把别人项目的会话搬过来 |
 
 ⇒ 集成文档里"按 location 隔离"必须实现为：**用 `?directory=` 查询 + 校验回包每条的
 `location.directory`**，不能照抄插件时代"连接声明一次、服务端过滤"的做法。
@@ -172,6 +174,23 @@ synthetic / system / skill / shell / assistant / compaction / idle`（`idle` 不
 `/revert/stage`、`/revert/commit`、`DELETE /revert`、`/form/{formID}/reply`、
 `POST /api/plugin/check|update`、`POST /api/location/reload`。
 
+### 7.1 已实际触发过的写面（2026-09-27，全部落在一次性 scratch 位置，事后已回收）
+
+探测会话建在 `D:\aa-recovery\scratch-project`（**不是** `prompt`，一次模型回合都没跑），4 个会话
+`DELETE` 后回读 `SessionNotFoundError` 确认无残留。实测：
+
+| 触发 | 结果 |
+| --- | --- |
+| `POST /api/session {"title":…}` | **200**，落在 `C:\Users\34296`（宿主默认位置）⇒ 不带 `location` 建的会话**不会出现在本实例清单里**，这是真实缺陷而不是理论风险 |
+| `POST /api/session {"title", "location":{"directory":…}}` | 200，回包带 `location.directory` 与 `projectID`，且该位置出现在 `/api/debug/location` 里 |
+| `POST …/interrupt`（无体）与带 `{}` | 都是 200 `{"interrupted": false}` ⇒ 无体是对的，带 `{}` 也不报错；空闲会话上"没打断任何东西"要如实报 |
+| `POST …/command {"name","text"}` | **HTTP_404 `CommandNotFoundError`** ⇒ 字段名被接受，错误发生在"命令不存在"这一步 |
+| `POST …/command {"command","arguments"}` | **HTTP_400 `Missing key at ["name"]`** ⇒ 旧写法必然失败 |
+| `POST …/prompt {}` | 400 `Missing key at ["text"]` ⇒ 必填键是 `text`（早先记成 `parts` 是照报错猜的） |
+| `POST …/model {"model":{"id":…}}` | 400 `Missing key at ["model"]["providerID"]` ⇒ 裸 model id 必须像现在这样在本地就拒 |
+| `POST …/permission/x/reply {"decision":"maybe"}` | 400 `Expected Permission.Reply at ["decision"]` |
+| `DELETE /api/session/{id}` | **成功但响应体为空** ⇒ 之前 `_request` 对空 2xx 体走 `.json()` 失败 ⇒ 报成"服务不可达"。`/model`、`/agent`、`/command` 的 200 也是空体 ⇒ 不修就是**每次改模型/换 Agent 都被当成断线** |
+
 ## 8. 与 rev3 契约裁定的对应关系
 
 | rev3 裁定 | 插件形态实现 | 对端形态实现 | 语义是否保持 |
@@ -198,6 +217,11 @@ synthetic / system / skill / shell / assistant / compaction / idle`（`idle` 不
    （不是 N 条 item）。
 6. **`?type=` 过滤**：枚举里没有 `idle`，但 `idle` 确实在响应里 ⇒ 用 `type` 过滤会不会把生命周期
    消息漏掉，未证（当前实现不使用该参数）。
+7. **`delivery: "steer"`**：规格上 prompt 支持 `steer|queue`，说明"插话"不是没有，只是没有单独端点。
+   未在一次真实运行中的回合上试过一次 ⇒ `session.steer` 仍报 unsupported（原因文案已改成事实）。
+8. **`POST /api/experimental/session/{id}/skill`**：能直接触发技能（`GET /api/skill` 16 条可列），
+   但"触发后宿主怎么显示"未证 ⇒ AA 侧目前只读不写。
+9. **审批真发一次**（同 2）：`reply` 的字段校验已被实测接受，但"批准后宿主确实执行那一步"仍未证。
 
 ## 10. 复现命令
 

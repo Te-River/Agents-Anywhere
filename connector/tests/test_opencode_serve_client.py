@@ -179,6 +179,21 @@ class TestDecoding:
 
         asyncio.run(run())
 
+    def test_an_empty_success_body_is_none_not_an_outage(self) -> None:
+        # Measured: `DELETE /api/session/{id}` (and `/model`, `/agent`,
+        # `/command`) answer with no body at all. The old code ran `.json()` on
+        # it and reported the service as unreachable.
+        client = client_for(lambda request: httpx.Response(204))
+
+        async def run() -> None:
+            try:
+                assert await client.post("/api/session/ses_1") is None
+                assert await client.get("/api/session/ses_1/permission") is None
+            finally:
+                await client.aclose()
+
+        asyncio.run(run())
+
     def test_post_sends_a_json_body(self) -> None:
         seen: dict[str, Any] = {}
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -148,13 +149,13 @@ def test_missing_registration_is_actionable_not_a_crash() -> None:
     assert "opencode serve" in detail["message"], "the message must name what the user can actually run"
 
 
-def test_a_location_the_service_never_loaded_is_named_not_shown_as_empty() -> None:
-    # `/api/session?directory=` answers `[]` for a location the host has not
+def test_a_location_that_cannot_be_opened_is_named_not_shown_as_empty() -> None:
+    # `/api/session?directory=` answers `[]` for anything the host has not
     # loaded, so "no sessions" and "wrong path typed" are the same symptom at
-    # that layer. Resolving against /api/debug/location keeps them distinct.
+    # that layer. Only a location that cannot be a project at all is refused.
     routes = dict(BASE_ROUTES)
     routes[("GET", "/api/debug/location")] = [{"directory": "/other/place"}]
-    runtime, host = build(routes, values={"maxRestartAttempts": 0})
+    runtime, host = build(routes, values={"location": "/work/repo/definitely-not-here", "maxRestartAttempts": 0})
 
     async def scenario() -> None:
         await runtime.start()
@@ -162,8 +163,54 @@ def test_a_location_the_service_never_loaded_is_named_not_shown_as_empty() -> No
     run(scenario())
     _status, detail = host.health[-1]
     assert detail["code"] == "location_not_loaded"
-    assert DIRECTORY in detail["message"]
+    assert "/work/repo/definitely-not-here" in detail["message"]
     assert "/other/place" not in detail["message"], "the ask is the user's own path, not a dump of the host's"
+
+
+def test_an_unloaded_but_real_location_runs_and_reports_partial_discovery(tmp_path) -> None:
+    # The host loads a location when the first session is created there, so a
+    # project OpenCode has not opened yet must attach and say what it can see
+    # rather than refuse to start.
+    location = str(tmp_path / "new-project")
+    Path(location).mkdir()
+    routes = dict(BASE_ROUTES)
+    routes[("GET", "/api/debug/location")] = [{"directory": str(tmp_path / "already-open")}
+                                              ]
+    routes[("POST", "/api/session")] = httpx.Response(
+        200, json={"data": {"id": "ses_new", "location": {"directory": location}}}
+    )
+    routes[("POST", "/api/session/ses_new/prompt")] = httpx.Response(200, json={})
+    runtime, _ = build(routes, values={"location": location})
+
+    async def discovery_row() -> tuple[Any, Any]:
+        caps = await runtime.get_runtime_capabilities()
+        row = next(item for item in caps.capabilities if item.capability_id == "session.discovery")
+        return (row.available, dict(row.metadata), runtime.supports_complete_session_inventory())
+
+    async def scenario() -> Any:
+        await runtime.start()
+        before = await discovery_row()
+        created = await runtime.create_and_start_session("any", "开工")
+        return before, created, await discovery_row()
+
+    before, created, after = run(scenario())
+    assert before == (False, {"discoveryState": "partial"}, False)
+    assert created.ok is True
+    assert after == (True, {"discoveryState": "complete"}, True), "the create response taught us the host's spelling"
+
+
+def test_an_empty_success_body_is_not_read_as_an_outage() -> None:
+    # `/model`, `/agent`, `/command` and `DELETE /api/session/{id}` all answer
+    # with no body; parsing that as JSON used to raise "service unreachable".
+    routes = dict(BASE_ROUTES)
+    routes[("POST", f"/api/session/{EXTERNAL}/model")] = httpx.Response(204)
+    runtime, _ = build(routes)
+
+    async def scenario() -> Any:
+        await runtime.start()
+        return await runtime.update_session_selections(MAIN_PLATFORM, EXTERNAL, {"model": "lxns-uni/glm-5.3"})
+
+    assert run(scenario()).result["applied"] == ["model"]
 
 
 def test_scoped_queries_use_the_hosts_own_spelling_of_the_location() -> None:
@@ -478,7 +525,7 @@ def test_interrupt_posts_to_the_host() -> None:
     assert ("POST", f"/api/session/{EXTERNAL}/interrupt", None) in host.requests, "the endpoint declares no body"
 
 
-def test_an_interrupt_the_host_did_not_act_on_is_not_reported_as_success() -> None:
+def test_an_interrupt_the_host_did_not_act_on_is_reported_as_a_no_op() -> None:
     routes = dict(BASE_ROUTES)
     routes[("POST", f"/api/session/{EXTERNAL}/interrupt")] = httpx.Response(200, json={"data": {"interrupted": False}})
     runtime, _ = build(routes)
@@ -488,7 +535,9 @@ def test_an_interrupt_the_host_did_not_act_on_is_not_reported_as_success() -> No
         rows = await runtime.list_complete_session_inventory()
         return await runtime.interrupt_session(rows[0].session_id)
 
-    assert run(scenario()).ok is False
+    # Nothing-running is benign, so it follows the shape Claude's interrupt
+    # already reports instead of surfacing a failure.
+    assert run(scenario()).result["alreadyStopped"] is True
 
 
 def test_execute_command_sends_the_hosts_own_field_names() -> None:

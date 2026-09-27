@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from contextlib import suppress
+from pathlib import Path
 from typing import Any, Callable
 
 from connector.logging import logger
@@ -128,22 +129,30 @@ CAPABILITY_ROWS: tuple[dict[str, Any], ...] = (
 )
 
 
-def capability_rows(directory: str | None) -> list[dict[str, Any]]:
+def capability_rows(directory: str | None, *, loaded: bool = True) -> list[dict[str, Any]]:
     """Wire-form capability rows, with discovery state derived from the location.
 
     rev3 ruling 2: the discovery state rides this row's metadata and is never a
     new boolean. The host service answers `GET /api/session` with a paginated
-    inventory, so with a location bound this really is `complete` -- reporting
-    that without a location would overstate what one instance can see.
+    inventory, so with a location the host has actually loaded this really is
+    `complete` -- claiming that for a location the service has never opened, or
+    with no location at all, would overstate what one instance can see.
     """
     rows = [dict(row) for row in CAPABILITY_ROWS]
+    available = bool(directory) and loaded
+    if not directory:
+        reason = "no location configured for this instance"
+    elif not loaded:
+        reason = "the OpenCode service has not loaded this location yet"
+    else:
+        reason = None
     rows.append(
         {
             "capabilityId": "session.discovery",
             "supported": True,
-            "available": bool(directory),
-            "reason": None if directory else "no location configured for this instance",
-            "metadata": {"discoveryState": "complete" if directory else "partial"},
+            "available": available,
+            "reason": reason,
+            "metadata": {"discoveryState": "complete" if available else "partial"},
         }
     )
     return rows
@@ -231,7 +240,8 @@ class OpenCodeServiceRuntime(AgentRuntime):
                     {
                         "code": "location_not_loaded" if location_only else "runtime_unavailable",
                         "message": (
-                            f"OpenCode 没有加载 {self.directory}：请在 OpenCode 里打开这个项目后重试。"
+                            f"OpenCode 无法为 {self.directory} 提供服务：这个路径不是一个可打开的目录；"
+                            "请先在 OpenCode 里打开这个项目。"
                             if location_only
                             else (
                                 "未找到可用的 OpenCode 服务：请打开 OpenCode 桌面版，或执行 "
@@ -273,13 +283,15 @@ class OpenCodeServiceRuntime(AgentRuntime):
 
         `GET /api/session?directory=` is scoped by a **case-sensitive string
         compare** against the host's own spelling: `d:/github/agents-anywhere`
-        answers an empty list, and so does a directory the host has simply not
-        loaded (a wholly unknown path is an HTTP 500). `/api/model`, `/api/agent`
-        and `/api/command` ignore the parameter entirely, so an empty session
-        list is the only symptom of a mistyped location -- and it is
-        indistinguishable at that layer from "this project has no sessions".
-        Resolving through `/api/debug/location` and refusing to guess when
-        nothing matches turns that into a reported problem.
+        answers an empty list, and so does a directory the host has not loaded
+        (a non-absolute value is an HTTP 500). `/api/model`, `/api/agent` and
+        `/api/command` ignore the parameter entirely, so an empty session list is
+        the only symptom of a mistyped location -- indistinguishable at that
+        layer from "this project has no sessions". Resolving through
+        `/api/debug/location` recovers the host's spelling for any loaded project;
+        a path that does not exist on disk is refused outright, and one that
+        exists but has not been loaded yet stays unresolved, which the discovery
+        capability reports as `partial` rather than pretending to be complete.
         """
         wanted = self.directory
         if wanted is None:
@@ -292,10 +304,12 @@ class OpenCodeServiceRuntime(AgentRuntime):
             candidate = row.get("directory")
             if isinstance(candidate, str) and canonical_path(candidate) == target:
                 return candidate
-        raise OpenCodeLocationNotLoaded(
-            f"the OpenCode service has not loaded {wanted!r}; its locations are "
-            f"{[str(row.get('directory')) for row in loaded if isinstance(row, Mapping)][:5]}"
-        )
+        if not Path(wanted).is_dir():
+            raise OpenCodeLocationNotLoaded(
+                f"{wanted!r} is not a directory the OpenCode service can load; its "
+                f"locations are {[str(row.get('directory')) for row in loaded if isinstance(row, Mapping)][:5]}"
+            )
+        return None
 
     def _schedule_restart(self) -> None:
         if self._stopping or self._restart_task is not None:
@@ -357,7 +371,7 @@ class OpenCodeServiceRuntime(AgentRuntime):
                 unavailable_reason=row.get("reason"),
                 metadata=row.get("metadata", {}),
             )
-            for row in capability_rows(self._resolved_directory or self.directory)
+            for row in capability_rows(self.directory, loaded=bool(self._resolved_directory))
         ]
         self._catalog_revision += 1
         return RuntimeCapabilitySet(
@@ -418,7 +432,7 @@ class OpenCodeServiceRuntime(AgentRuntime):
         return await self._inventory(force=force)
 
     def supports_complete_session_inventory(self) -> bool:
-        return bool(self.directory)
+        return bool(self._resolved_directory)
 
     async def get_session_snapshot(
         self, session_id: str, external_session_id: str | None = None, limit: int | None = None
@@ -599,6 +613,14 @@ class OpenCodeServiceRuntime(AgentRuntime):
         external = (rows[0].get("id") if rows and isinstance(rows[0], Mapping) else created.get("id") if isinstance(created, Mapping) else None)
         if not isinstance(external, str):
             raise RuntimeUpstreamError("the host did not return the created session id")
+        if self._resolved_directory is None:
+            # Creating a session makes the host load its location and report the
+            # spelling it uses, which is what the case-sensitive `?directory=`
+            # filter needs from then on.
+            location = created.get("location") if isinstance(created, Mapping) else None
+            spelling = location.get("directory") if isinstance(location, Mapping) else None
+            if isinstance(spelling, str) and spelling:
+                self._resolved_directory = spelling
         platform_id = mappers.platform_session_id(self.host.session_namespace, external)
         self._external_by_session[platform_id] = external
         if pending:
@@ -640,15 +662,18 @@ class OpenCodeServiceRuntime(AgentRuntime):
     async def interrupt_session(self, session_id: str, reason: str | None = None) -> RuntimeOperationResult:
         client = await self._ensure_client()
         external = await self._resolve_external(session_id, None)
-        # Declared with no request body; the answer is `{interrupted: boolean}`, so
-        # a refusal is reported rather than a blank "ok".
+        # Declared with no request body; the answer is `{interrupted: boolean}`.
+        # Nothing-running is a benign no-op, so it follows the shape Claude's
+        # interrupt already reports rather than being dressed up as a failure.
         payload = await client.post(f"/api/session/{external}/interrupt")
         interrupted = payload.get("interrupted") if isinstance(payload, Mapping) else None
         return RuntimeOperationResult(
-            ok=bool(interrupted),
-            code="interrupted" if interrupted else "not_interrupted",
-            message=None if interrupted else "the host reported nothing was running to interrupt",
-            result={"externalSessionId": external, "interrupted": interrupted},
+            ok=True,
+            result={
+                "externalSessionId": external,
+                "interrupted": bool(interrupted),
+                "alreadyStopped": not bool(interrupted),
+            },
         )
 
     async def update_session_selections(
