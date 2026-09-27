@@ -5,7 +5,8 @@ Agents Anywhere 侧对端中转」这一形态决策的判据来源；插件侧�
 [`opencode-plugin/VERIFICATION.md`](../opencode-plugin/VERIFICATION.md)。
 
 实测环境：`opencode v2.0.18`（桌面 App `@opencode-aidesktop` 内嵌 CLI），Windows 11。
-所有对活实例的访问都是只读 `GET`；写面语义取自实例自报的 OpenAPI 规格，未实际触发。
+所有对活实例的访问都是只读 `GET`；写面形状取自实例自报的 OpenAPI 规格，**除字段名/必填键外未实际触发**
+（早先"`parts` 必填"一条就是照抄报错猜的，§7 已按规格更正）。
 二进制逆向在副本上进行（`D:\桌面\Opencode逆向\opencode-cli.exe`，205,848,968 字节），
 原安装目录未做任何修改。
 
@@ -153,24 +154,32 @@ synthetic / system / skill / shell / assistant / compaction / idle`（`idle` 不
 ⇒ 插件时代两条"永久限制"在这里消失：**回合状态不必自造判据**（`session.execution.*`），
 **会话发现不必恒 partial**（`GET /api/session` 是可分页全量清单 + `cursor`）。
 
-## 7. 写面（取自实例自报规格，未实际触发）
+## 7. 写面（形状取自实例自报规格；除 prompt/command 的字段名外未实际触发）
 
-`POST /api/session/{id}/prompt`（`parts` 必填，实测空 `parts` 返回
-`InvalidRequestError "Missing key at [\"text\"]"`）、`/interrupt`、`/model`、`/agent`、`/compact`、
-`/fork`、`/command`、`/shell`、`/synthetic`、`/move`、`/view`、`/background`、
+| 端点 | 请求体（`req=` 为必填键） | 备注 |
+| --- | --- | --- |
+| `POST /api/session` | `{id?, title?, agent?, model?:{id,providerID,variant?}, location?:{directory}, metadata?, permissions?}` | **没有 `parentID` 字段** ⇒ 无法主动派生子会话；不写 `location` 就落在宿主默认位置，会从这个实例的清单里消失 |
+| `POST /api/session/{id}/prompt` | `req=[text]`，另有 `id?, files?, agents?, skills?, metadata?, delivery?: steer\|queue, resume?: bool` | 之前记的"`parts` 必填"是错的：必填键是 **`text`**（当时的报错 `Missing key at ["text"]` 说的就是这个）。`delivery:"steer"` ⇒ steer 不是没有，是没有单独端点（见 §9） |
+| `POST /api/session/{id}/command` | `req=[name, text]`，可选 `files/agents/skills/delivery` | 字段名是 `name`/`text`，不是 `command`/`arguments` |
+| `POST /api/session/{id}/model` | `req=[model]`，`model=req=[id,providerID]` | 裸 model id 必须拒绝：`id` 跨 provider 重复 |
+| `POST /api/session/{id}/agent` | `req=[agent]` | — |
+| `POST /api/session/{id}/interrupt` | **无请求体**，查询参数 `resume` | 响应 `{interrupted: boolean}` ⇒ 没东西可打断时要如实报 false |
+| `POST /api/session/{id}/permission/{requestID}/reply` | `req=[decision]`，`decision ∈ once\|always\|reject`，`message?` | 连接器侧永不当面接受 `always`（会改写宿主持久规则） |
+| `POST /api/experimental/session/{id}/skill` | `req=[id]`，`resume?` | **"我想调用 OpenCode 的 Skills" 的答案就在这里**：`GET /api/skill` 16 条 + 这个触发端点；AA 侧目前未接 |
+| `PUT/DELETE /api/experimental/mcp/{server}`、`POST …/connect`、`POST …/disconnect` | connect/disconnect 无体，查询参数 `location` | 控制 MCP 开关的面；本机没配 MCP，未证（§9） |
+
+其余：`/compact`、`/fork`、`/shell`、`/synthetic`、`/move`、`/view`、`/background`、
 `/revert/stage`、`/revert/commit`、`DELETE /revert`、`/form/{formID}/reply`、
-`/permission/{requestID}/reply`（`Permission.Reply` = `once | always | reject`）。
-另有 `PUT/DELETE /api/experimental/mcp/{server}`、`POST …/connect`、`POST …/disconnect`、
-`POST /api/experimental/session/{id}/skill`、`POST /api/plugin/check|update`、`POST /api/location/reload`。
+`POST /api/plugin/check|update`、`POST /api/location/reload`。
 
 ## 8. 与 rev3 契约裁定的对应关系
 
 | rev3 裁定 | 插件形态实现 | 对端形态实现 | 语义是否保持 |
 | --- | --- | --- | --- |
-| 1 `location` 必填、Hub fail-closed | 连接 `initialize` 声明一次，Hub 按目录过滤 | 每类清单带 `?directory=`，并校验回包 `location.directory` | 保持（防线从"连接身份"改为"每次查询参数 + 回包校验"） |
+| 1 `location` 必填、Hub fail-closed | 连接 `initialize` 声明一次，Hub 按目录过滤 | attach 时用 `/api/debug/location` 把配置位置解析成宿主自己的拼写（解析不到 ⇒ `location_not_loaded`），查询带 `?directory=`，再校验回包 `location.directory` | 保持（防线从"连接身份"改为"解析 + 查询参数 + 回包校验"；大小写敏感见 §3） |
 | 2 `session.discovery` 的 `metadata.discoveryState` | 只有事件流 ⇒ 恒 `partial` | 有全量清单 ⇒ 可 `complete` | 保持且更强（禁止伪造仍是硬规） |
 | 3 `historyHash` 前缀校准 | 自研 | 仍需要（SSE 断线重连后的续推判据，见 §9） | 待定 |
-| 4 跳过计数器归属（Hub `skippedEventCount` / Connector `skippedItemCount`） | 两侧各自计数 | 合并到对端一侧后归属需重划 | 待定 |
+| 4 跳过计数器归属（Hub `skippedEventCount` / Connector `skippedItemCount`） | 两侧各自计数 | 快照元数据 `skippedMessageTypes`（实测某会话 `idle_without_turn: 62`）；事件面尚未接 | 快照面保持，事件面待定 |
 
 ## 9. 未证清单（动手前必须先测，别当已知）
 

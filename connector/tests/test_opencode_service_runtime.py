@@ -425,7 +425,7 @@ def test_steer_is_unsupported_on_this_transport() -> None:
         run(scenario())
 
 
-def test_create_session_applies_selections_then_prompts() -> None:
+def test_create_session_asks_for_its_own_location_and_applies_selections_then_prompts() -> None:
     routes = dict(BASE_ROUTES)
     routes[("POST", "/api/session")] = httpx.Response(200, json={"data": {"id": "ses_new"}})
     routes[("POST", "/api/session/ses_new/model")] = httpx.Response(200, json={})
@@ -434,13 +434,19 @@ def test_create_session_applies_selections_then_prompts() -> None:
 
     async def scenario() -> Any:
         await runtime.start()
-        return await runtime.create_and_start_session("any", "开工", selections={"model": "lxns-uni/glm-5.3"})
+        return await runtime.create_and_start_session("any", "开工", selections={"model": "lxns-uni/glm-5.3", "agent": "team"})
 
     result = run(scenario())
     assert result.result["externalSessionId"] == "ses_new"
     assert result.result["sessionId"].startswith("sess_opencode_")
-    model_call = next(call for call in host.requests if call[1].endswith("/model"))
-    assert model_call[2] == {"model": {"id": "glm-5.3", "providerID": "lxns-uni"}}
+    created = next(call for call in host.requests if call[1] == "/api/session")
+    assert created[2] == {
+        "title": "开工",
+        "location": {"directory": DIRECTORY},
+        "model": {"id": "glm-5.3", "providerID": "lxns-uni"},
+        "agent": "team",
+    }, "a session created without a location lands outside the inventory we read"
+    assert not [call for call in host.requests if call[1].endswith("/model")], "the create body already carries them"
     assert any(call[1].endswith("/prompt") for call in host.requests)
 
 
@@ -459,7 +465,7 @@ def test_a_bare_model_selection_is_rejected_not_guessed() -> None:
 
 def test_interrupt_posts_to_the_host() -> None:
     routes = dict(BASE_ROUTES)
-    routes[("POST", f"/api/session/{EXTERNAL}/interrupt")] = httpx.Response(200, json={})
+    routes[("POST", f"/api/session/{EXTERNAL}/interrupt")] = httpx.Response(200, json={"data": {"interrupted": True}})
     runtime, host = build(routes)
 
     async def scenario() -> Any:
@@ -467,8 +473,36 @@ def test_interrupt_posts_to_the_host() -> None:
         rows = await runtime.list_complete_session_inventory()
         return await runtime.interrupt_session(rows[0].session_id)
 
-    run(scenario())
-    assert ("POST", f"/api/session/{EXTERNAL}/interrupt", {}) in host.requests
+    result = run(scenario())
+    assert result.ok is True
+    assert ("POST", f"/api/session/{EXTERNAL}/interrupt", None) in host.requests, "the endpoint declares no body"
+
+
+def test_an_interrupt_the_host_did_not_act_on_is_not_reported_as_success() -> None:
+    routes = dict(BASE_ROUTES)
+    routes[("POST", f"/api/session/{EXTERNAL}/interrupt")] = httpx.Response(200, json={"data": {"interrupted": False}})
+    runtime, _ = build(routes)
+
+    async def scenario() -> Any:
+        await runtime.start()
+        rows = await runtime.list_complete_session_inventory()
+        return await runtime.interrupt_session(rows[0].session_id)
+
+    assert run(scenario()).ok is False
+
+
+def test_execute_command_sends_the_hosts_own_field_names() -> None:
+    routes = dict(BASE_ROUTES)
+    routes[("POST", f"/api/session/{EXTERNAL}/command")] = httpx.Response(200, json={})
+    runtime, host = build(routes)
+
+    async def scenario() -> Any:
+        await runtime.start()
+        return await runtime.execute_command(MAIN_PLATFORM, "review", raw="the diff", external_session_id=EXTERNAL)
+
+    result = run(scenario())
+    assert result.ok is True
+    assert ("POST", f"/api/session/{EXTERNAL}/command", {"name": "review", "text": "the diff"}) in host.requests
 
 
 # ------------------------------------------------------------------- catalogs

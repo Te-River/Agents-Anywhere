@@ -117,7 +117,7 @@ CAPABILITY_ROWS: tuple[dict[str, Any], ...] = (
         "capabilityId": "session.steer",
         "supported": False,
         "available": False,
-        "reason": "the host exposes no steer endpoint",
+        "reason": 'prompt declares delivery:"steer", but it is unproven against a live turn',
     },
     {
         "capabilityId": "runtime.attachment",
@@ -551,11 +551,9 @@ class OpenCodeServiceRuntime(AgentRuntime):
     ) -> RuntimeCommandResult:
         client = await self._ensure_client()
         external = await self._resolve_external(session_id, external_session_id)
-        body: dict[str, Any] = {"command": command}
-        if raw is not None:
-            body["arguments"] = raw
-        elif args:
-            body["arguments"] = " ".join(args)
+        # The host's `Command.Execute` is `{name, text}` -- both required. Sending
+        # `command`/`arguments` was a guess that the service answered 400 to.
+        body: dict[str, Any] = {"name": command, "text": raw if raw is not None else " ".join(args)}
         payload = await client.post(f"/api/session/{external}/command", body)
         return RuntimeCommandResult(
             command=command,
@@ -581,8 +579,21 @@ class OpenCodeServiceRuntime(AgentRuntime):
             return RuntimeOperationResult(ok=False, code="unsupported", message="attachments are not supported yet")
         client = await self._ensure_client()
         body: dict[str, Any] = {"title": title or (content[:40] or "Agents Anywhere")}
-        # `parentID` is accepted by the host and silently dropped, so it is never
-        # sent: pretending a child session exists would mislead the UI.
+        # One service can serve several locations, and `POST /api/session` defaults
+        # to the host's own; without this the new session lands outside the
+        # inventory this instance reads and vanishes from the UI.
+        directory = self._resolved_directory or self.directory
+        if directory:
+            body["location"] = {"directory": directory}
+        # `parentID` is not a field of the create body at all, so a child session
+        # cannot be requested here; the host's own subagents show up on their own.
+        pending = dict(selections or {})
+        agent = pending.pop("agent", None)
+        model = pending.pop("model", None)
+        if isinstance(agent, str) and agent:
+            body["agent"] = agent
+        if isinstance(model, str) and model:
+            body["model"] = _model_ref(model)
         created = await client.post("/api/session", body)
         rows = _rows(created)
         external = (rows[0].get("id") if rows and isinstance(rows[0], Mapping) else created.get("id") if isinstance(created, Mapping) else None)
@@ -590,7 +601,8 @@ class OpenCodeServiceRuntime(AgentRuntime):
             raise RuntimeUpstreamError("the host did not return the created session id")
         platform_id = mappers.platform_session_id(self.host.session_namespace, external)
         self._external_by_session[platform_id] = external
-        await self._apply_selections(client, external, selections)
+        if pending:
+            await self._apply_selections(client, external, pending)
         turn = await self._prompt(client, external, content, client_message_id)
         return RuntimeOperationResult(
             ok=True,
@@ -628,8 +640,16 @@ class OpenCodeServiceRuntime(AgentRuntime):
     async def interrupt_session(self, session_id: str, reason: str | None = None) -> RuntimeOperationResult:
         client = await self._ensure_client()
         external = await self._resolve_external(session_id, None)
-        await client.post(f"/api/session/{external}/interrupt", {})
-        return RuntimeOperationResult(ok=True, code="interrupted", result={"externalSessionId": external})
+        # Declared with no request body; the answer is `{interrupted: boolean}`, so
+        # a refusal is reported rather than a blank "ok".
+        payload = await client.post(f"/api/session/{external}/interrupt")
+        interrupted = payload.get("interrupted") if isinstance(payload, Mapping) else None
+        return RuntimeOperationResult(
+            ok=bool(interrupted),
+            code="interrupted" if interrupted else "not_interrupted",
+            message=None if interrupted else "the host reported nothing was running to interrupt",
+            result={"externalSessionId": external, "interrupted": interrupted},
+        )
 
     async def update_session_selections(
         self, session_id: str, external_session_id: str | None, selections: Mapping[str, str | None]
@@ -756,14 +776,7 @@ class OpenCodeServiceRuntime(AgentRuntime):
             return applied
         model = selections.get("model")
         if isinstance(model, str) and model:
-            provider_id, slash, model_id = model.partition("/")
-            if not slash or not model_id:
-                # `Model.Ref` requires both halves; a bare id would be a guess
-                # about which provider the user meant.
-                raise RuntimeInvalidRequestError(
-                    f"model selection {model!r} must be 'providerID/modelID'"
-                )
-            await client.post(f"/api/session/{external}/model", {"model": {"id": model_id, "providerID": provider_id}})
+            await client.post(f"/api/session/{external}/model", {"model": _model_ref(model)})
             applied.append("model")
         agent = selections.get("agent")
         if isinstance(agent, str) and agent:
@@ -807,6 +820,19 @@ def _selections(row: Mapping[str, Any]) -> dict[str, str | None]:
         if isinstance(model_id, str):
             selections["model"] = f"{provider_id}/{model_id}" if isinstance(provider_id, str) else model_id
     return selections
+
+
+def _model_ref(model: str) -> dict[str, str]:
+    """`providerID/modelID` -> the host's `Model.Ref`.
+
+    A bare id is refused rather than guessed at: the host really does repeat ids
+    across providers (measured: 79 rows, four repeated ids), so picking a
+    provider silently would run the wrong model.
+    """
+    provider_id, slash, model_id = model.partition("/")
+    if not slash or not model_id or not provider_id:
+        raise RuntimeInvalidRequestError(f"model selection {model!r} must be 'providerID/modelID'")
+    return {"id": model_id, "providerID": provider_id}
 
 
 def _refuse(notice_id: str, message: str) -> RuntimeOperationResult:
