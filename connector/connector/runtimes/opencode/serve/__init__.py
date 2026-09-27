@@ -11,6 +11,12 @@ from connector.runtimes.opencode.serve.client import (
     OpenCodeServiceError,
     OpenCodeServiceUnavailable,
 )
+from connector.runtimes.opencode.serve.mappers import (
+    agent_catalog,
+    model_catalog,
+    platform_session_id,
+    session_meta,
+)
 from connector.runtimes.opencode.serve.service import OpenCodeService, read_service, service_file
 
 __all__ = [
@@ -18,6 +24,10 @@ __all__ = [
     "OpenCodeService",
     "OpenCodeServiceError",
     "OpenCodeServiceUnavailable",
+    "agent_catalog",
+    "model_catalog",
+    "platform_session_id",
     "read_service",
     "service_file",
+    "session_meta",
 ]
