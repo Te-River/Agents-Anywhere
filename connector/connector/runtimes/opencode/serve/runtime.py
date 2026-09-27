@@ -402,9 +402,11 @@ class OpenCodeServiceRuntime(AgentRuntime):
         event_type = events.frame_type(frame)
         location = events.frame_location(frame)
         target = self._resolved_directory or self.directory
-        if location is not None and target is not None and canonical_path(location) != canonical_path(target):
-            self._event_actions[f"skipped:{event_type}"] += 1
-            return
+        foreign = (
+            location is not None
+            and target is not None
+            and canonical_path(location) != canonical_path(target)
+        )
         external = events.frame_session_id(frame)
         sequence = events.durable_sequence(frame)
         resync = False
@@ -414,6 +416,15 @@ class OpenCodeServiceRuntime(AgentRuntime):
             resync = events.needs_resync(previous, seq)
             self._durable_seq[aggregate] = max(previous or -1, seq)
         actions = set(events.actions_for(event_type))
+        if foreign:
+            # The catalogs are service-wide (the host ignores `?directory=`), so a
+            # frame from another project still means "re-read what this service
+            # offers". Everything else is session-scoped and must stay out.
+            catalog_only = actions & {events.REFRESH_CATALOGS}
+            if not catalog_only:
+                self._event_actions[f"skipped:{event_type}"] += 1
+                return
+            actions = catalog_only
         if resync:
             # We missed frames and cannot ask for them again: rebuild from source.
             actions.add(events.REFRESH_TIMELINE)

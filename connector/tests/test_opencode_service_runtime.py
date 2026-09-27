@@ -783,6 +783,25 @@ def test_a_catalog_event_republishes_both_catalogs() -> None:
     assert published(host, "agentCatalog") == [{"count": 1}]
 
 
+def test_a_catalog_event_from_another_location_still_republishes_catalogs() -> None:
+    # `?directory=` does not scope /api/model or /api/agent, so the catalogs
+    # describe the whole service: a provider change opened in another project
+    # still changes what this instance can offer.
+    routes = dict(BASE_ROUTES)
+    routes[("GET", "/api/model")] = [{"id": "m", "providerID": "p", "name": "M"}]
+    routes[("GET", "/api/agent")] = [{"id": "build", "name": "build", "mode": "primary"}]
+    runtime, host = build(routes)
+
+    async def scenario() -> None:
+        await runtime.start()
+        await feed(runtime, frame("model.updated", directory="/other/place"))
+        await runtime.stop()
+
+    run(scenario())
+    assert published(host, "modelCatalog") == [{"count": 1}]
+    assert not [entry for entry in host.published if entry[0] == "state"]
+
+
 def test_a_session_row_event_only_updates_the_row_for_this_location() -> None:
     routes = dict(BASE_ROUTES)
     routes[("GET", f"/api/session/{EXTERNAL}")] = httpx.Response(

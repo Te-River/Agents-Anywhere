@@ -130,6 +130,9 @@ synthetic / system / skill / shell / assistant / compaction / idle`（`idle` 不
 
 ⇒ 第三方插件装砸了能显形（本机真实样本：`@slkiser/opencode-quota@latest` =
 `status:"failed", error:"Plugin must export a default …"` 且 `outdated:true`）。
+⇒ **provider 前缀不是装饰**：`space-bunny-free` 同时挂在 `opencode-go` 与 `opencode` 两个 provider 下，
+实测 `opencode-go/space-bunny-free` 直接 `Missing API key.`（回合失败），`opencode/space-bunny-free` 正常出词。
+所以目录必须按 `providerID/modelID` 组键、发消息必须带两半 —— 塌成一条或猜 provider 都会把用户推进坏的那一半。
 ⇒ 模型目录的正确组键是 **`providerID/modelID`**（两条都保留、都可选）；宿主内 `ctx.model`
 那条路上我们只能塌成一条，这是形态差异带来的实质改善。
 ⇒ **`?directory=` 对 `/api/model`、`/api/agent`、`/api/command`、`/api/config` 一律无效**：
@@ -184,7 +187,23 @@ synthetic / system / skill / shell / assistant / compaction / idle`（`idle` 不
 - 空闲 10s 只有一帧 `server.connected` ⇒ 心跳是 SSE 注释行（`: heartbeat`），不是事件帧。
 - 一次 30s 读超时后泵会自行重连并继续收帧（实测 `stream:error` 计 1 次后仍收到后续事件）。
 
-## 7. 写面（形状取自实例自报规格；除 prompt/command 的字段名外未实际触发）
+### 6.2 真发一次回合时看到的帧（2026-09-27，只读 Agent + 免费模型）
+
+在一次性目录里 `create_and_start_session` 真跑了一轮（agent=`plan`、model=`opencode/space-bunny-free`、
+提示"只回复两个字"），事件计数器就是这一轮的原始证据：
+
+`session.created` → `session.inbox.enqueued`(未路由，忽略) → `session.execution.started` →
+`session.inbox.delivered` → `session.step.started` → `session.step.failed`/`session.execution.succeeded` →
+`session.deleted`（**晚到**：断流太快就看不到）；期间还混进别处的 `provider.updated`、`model.updated`、
+`location.shutdown`、`rpc.experimental.browser.control` ⇒ **帧是整机共享的，必须按 `location` 自己过滤**；
+其中 catalog 类事件即使在别的位置也要生效（目录面本来就是整机语义，见 §5）。
+
+回合本身的结果：`turn.start / message(user) / message(assistant "收到") / turn.end(done)` 四条按时间顺序落好，
+`get_session_state` 回读 `selections={'agent':'plan','model':'opencode/space-bunny-free'}`。
+失败的样子也实测到了：换成 `opencode-go/space-bunny-free` 时宿主回 `Missing API key.`，被投影成
+`system/failed` 一条 + `turn.end` 状态 `failed` ⇒ **失败不会变成空白**。
+
+## 7. 写面（形状取自实例自报规格；§7.1 是实际触发过的部分，含一次真回合）
 
 | 端点 | 请求体（`req=` 为必填键） | 备注 |
 | --- | --- | --- |
@@ -204,8 +223,9 @@ synthetic / system / skill / shell / assistant / compaction / idle`（`idle` 不
 
 ### 7.1 已实际触发过的写面（2026-09-27，全部落在一次性 scratch 位置，事后已回收）
 
-探测会话建在 `D:\aa-recovery\scratch-project`（**不是** `prompt`，一次模型回合都没跑），4 个会话
-`DELETE` 后回读 `SessionNotFoundError` 确认无残留。实测：
+探测会话建在 `D:\aa-recovery\scratch-project`（**不是**用户项目目录）。早期几轮只验到字段校验；
+最后一轮用只读 agent `plan` + 免费模型 `opencode/space-bunny-free` 真跑了一轮（见 §6.2），
+会话同样 `DELETE` 后回读 `SessionNotFoundError` 确认无残留。实测：
 
 | 触发 | 结果 |
 | --- | --- |
@@ -218,6 +238,8 @@ synthetic / system / skill / shell / assistant / compaction / idle`（`idle` 不
 | `POST …/model {"model":{"id":…}}` | 400 `Missing key at ["model"]["providerID"]` ⇒ 裸 model id 必须像现在这样在本地就拒 |
 | `POST …/permission/x/reply {"decision":"maybe"}` | 400 `Expected Permission.Reply at ["decision"]` |
 | `DELETE /api/session/{id}` | **成功但响应体为空** ⇒ 之前 `_request` 对空 2xx 体走 `.json()` 失败 ⇒ 报成"服务不可达"。`/model`、`/agent`、`/command` 的 200 也是空体 ⇒ 不修就是**每次改模型/换 Agent 都被当成断线** |
+| `POST /api/session/{id}/prompt {"text":…}` | **真跑通**：回合起来、assistant 出词、`turn.end` 关闭 ⇒ 写面主链路成立 |
+| `POST /api/session` 带 `agent`+`model` | 201 且随后 `get_session_state` 回读到 `selections={'agent':'plan','model':'opencode/space-bunny-free'}` ⇒ 建会话时一次带上，省两次往返 |
 
 ## 8. 与 rev3 契约裁定的对应关系
 
