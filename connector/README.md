@@ -146,13 +146,23 @@ CLAUDE_BIN=/path/to/claude
 ```
 
 DSH requires the bridge integration described in
-[DSH Bridge Next](../dsh-bridge-next/README.md). OpenCode attaches through the
-in-process [OpenCode plugin](../opencode-plugin/README.md): the connector
-discovers its loopback endpoint files and never spawns OpenCode itself. OpenCode
-also publishes its agent directory: the plugin answers `catalog.listAgents` from
-the in-process `ctx.agent` surface, surfaced to the server as the generic
-`runtime.agentCatalog` RPC and pushed as the `agent_catalog_update` notification
-when it changes. Legacy ACP adapters are not part of the default provider registry.
+[DSH Bridge Next](../dsh-bridge-next/README.md). OpenCode attaches to the OpenCode
+host's own HTTP service, the same shape as Codex and Claude: OpenCode registers a
+machine-wide service in `$XDG_STATE_HOME/opencode/service.json` (or start one with
+`opencode serve --service`), and the connector joins that endpoint over
+`127.0.0.1` with Basic auth — it never spawns OpenCode and nothing is installed
+inside it. Each runtime instance binds one `(servicePid, location)` pair, so
+`location` scopes the session inventory and is required for complete discovery.
+Endpoint semantics, measured quirks and the reproduction commands live in
+[docs/opencode-server-surface.md](../docs/opencode-server-surface.md); the
+superseded in-process plugin form is described in
+[opencode-plugin/README.md](../opencode-plugin/README.md). OpenCode also publishes
+its agent and model directories (`GET /api/agent`, `GET /api/model`), surfaced to
+the server as the generic `runtime.agentCatalog` RPC and pushed as the
+`agent_catalog_update` notification when the host announces a change. Note that
+the model catalog keys on `providerID/modelID` because the host repeats bare ids
+across providers, and those two endpoints are service-wide — `?directory=` does
+not scope them. Legacy ACP adapters are not part of the default provider registry.
 
 The connector uses local runtime credentials and local filesystem permissions.
 Agents Anywhere does not proxy Claude or Codex account credentials.

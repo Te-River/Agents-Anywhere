@@ -1,8 +1,18 @@
 # OpenCode Plugin
 
+> **形态已变更（2026-09-27）**：Agents Anywhere 的 OpenCode 接入不再依赖本插件。
+> Connector 现在直接接宿主自带的 HTTP 服务面（`$XDG_STATE_HOME/opencode/service.json`
+> 注册 + `/api/*`），与 Codex / Claude 的接入形态一致；实现与实测证据见
+> [`docs/opencode-server-surface.md`](../docs/opencode-server-surface.md) 与
+> [`connector/connector/runtimes/opencode/serve/`](../connector/connector/runtimes/opencode/serve/)。
+> 本文下面描述的 **loopback bridge 传输在 Connector 侧已被删除**（`runtimes/opencode/bridge/`、
+> `runtime.py`、`discovery.py` 及其测试），所以本插件装载后**没有对端**：它仍会监听回环端口并
+> 写端点文件，但没有任何 Connector 会来扫。保留本目录只为登录命令（`/aa-login` 等）与历史取证；
+> 是否整体退役见仓库讨论。
+
 Agents Anywhere 的 OpenCode V2 接入，以 OpenCode **进程内插件**形态交付（包名 `@agents-anywhere/opencode-plugin`）。对宿主零侵入：不写 OpenCode 配置、不抢 hook、不另起常驻进程，只在本进程内监听回环端口并发布端点文件，等本机 Connector 上来连接。
 
-职责与分阶段定义见设计文档（不在本仓库提交，位于 `.git/opencode-team/20260926-213919/opencode-design/`：`01` 总设计含 P1–P5 分期、`02` P0 增量与假设表、`03` 契约裁定）；实现报告在同级 `opencode-p0/`、`opencode-p2/`、`opencode-p5/`。Connector 侧 runtime 见 [`connector/connector/runtimes/opencode/`](../connector/connector/runtimes/opencode/)，同类插件实现见 [DSH Bridge Next](../dsh-bridge-next/README.md)。
+职责与分阶段定义见设计文档（不在本仓库提交，位于 `.git/opencode-team/20260926-213919/opencode-design/`：`01` 总设计含 P1–P5 分期、`02` P0 增量与假设表、`03` 契约裁定）；实现报告在同级 `opencode-p0/`、`opencode-p2/`、`opencode-p5/`。对端形态的 Connector 侧 runtime 见 [`connector/connector/runtimes/opencode/serve/`](../connector/connector/runtimes/opencode/serve/)，同类插件实现见 [DSH Bridge Next](../dsh-bridge-next/README.md)。
 
 ## 已实现
 
@@ -246,4 +256,4 @@ PTY 实测（`opencode-cli` 2.0.18，证据见 VERIFICATION §二）：**全量 
 | `corepack yarn test` | `tsx --test` 跑 `tests/unit` 与 `tests/integration` |
 | `corepack yarn check` | `typecheck → check:build → build → test` 串联 |
 
-协议字段与 Connector 侧逐字段镜像：改 `src/shared/protocol.ts` 必须同步 `connector/connector/runtimes/opencode/bridge/*.py`（规范 JSON、内容哈希、会话 ID、能力 ID、同步 phase 都在两侧各写一份）。`runtime.error` 通知的 `data.code` 走白名单（`isascii`/字母数字/`_`，≤80 字符），不夹带原始异常消息或凭据。
+协议字段曾与 Connector 侧逐字段镜像（改 `src/shared/protocol.ts` 要同步 `connector/connector/runtimes/opencode/bridge/*.py`）——**该 bridge 目录已随对端形态改造删除**，现在两侧不再共享协议：对端直接用宿主 `/api/*` 的 JSON，形状与陷阱记在 [`docs/opencode-server-surface.md`](../docs/opencode-server-surface.md)。仍然保留的两侧一致性只有一条：平台会话 id 的推导 `sess_opencode_ + sha256("<namespace>:opencode:<externalId>")[:24]` 必须与历史数据字节一致（`serve/mappers.py::platform_session_id`）。`runtime.error` 通知的 `data.code` 走白名单（`isascii`/字母数字/`_`，≤80 字符），不夹带原始异常消息或凭据。
