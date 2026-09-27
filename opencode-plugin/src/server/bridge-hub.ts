@@ -774,9 +774,16 @@ export class BridgeHub {
       )
     }
     const agents: JsonObject[] = []
+    const seenAgentIds = new Set<string>()
+    const duplicateAgentIds: string[] = []
     for (const raw of items) {
       const agentId = firstString(raw['id'])
       if (agentId === null) continue
+      if (seenAgentIds.has(agentId)) {
+        duplicateAgentIds.push(agentId)
+        continue
+      }
+      seenAgentIds.add(agentId)
       const name = firstString(raw['name'])
       const description = firstString(raw['description'])
       agents.push({
@@ -789,6 +796,11 @@ export class BridgeHub {
         hidden: raw['hidden'] === true,
       })
     }
+    if (duplicateAgentIds.length > 0) {
+      this.#logger.warn('agent catalog repeats an id; kept the first entry per id', {
+        duplicates: [...new Set(duplicateAgentIds)],
+      })
+    }
     return { agents }
   }
 
@@ -797,6 +809,14 @@ export class BridgeHub {
    * (`{ runtime, revision, models: [{ id, title, ... }] }`). `ctx.model`'s item
    * shape is unverified (A10 probe did not expand it), so fields are read
    * defensively and a title falls back to the id, which the Connector requires.
+   *
+   * One row per id: the server's `validate_model_catalog` rejects the **whole**
+   * catalog over a repeated `id` or `selectionId`, and the host legitimately
+   * lists the same model id under two providers. Without collapsing them here a
+   * single repeat poisons the catalog and every notification queued behind it —
+   * observed on the real machine as 16× `duplicate model id` with the runtime
+   * stuck before `running`. The first entry wins; its id doubles as the
+   * selection id, which is still what the host needs to switch to that model.
    */
   async #listModels(values: JsonObject): Promise<JsonObject> {
     void values
@@ -809,6 +829,8 @@ export class BridgeHub {
       )
     }
     const models: JsonObject[] = []
+    const seenModelIds = new Set<string>()
+    const duplicateModelIds: string[] = []
     for (const raw of items) {
       const fallbackId = firstString(raw['modelID'])
       const rawId = firstString(raw['id'])
@@ -817,6 +839,11 @@ export class BridgeHub {
       if (modelId === null) continue
       const providerId = firstString(raw['providerID'])
       const id = rawId === null && providerId !== null ? `${providerId}/${modelId}` : modelId
+      if (seenModelIds.has(id)) {
+        duplicateModelIds.push(id)
+        continue
+      }
+      seenModelIds.add(id)
       const title = firstString(raw['title']) ?? name ?? id
       const description = firstString(raw['description'])
       models.push({
@@ -824,6 +851,11 @@ export class BridgeHub {
         title,
         ...(description !== null ? { description } : {}),
         selectionId: id,
+      })
+    }
+    if (duplicateModelIds.length > 0) {
+      this.#logger.warn('model catalog repeats an id; kept the first entry per id', {
+        duplicates: [...new Set(duplicateModelIds)],
       })
     }
     return { runtime: RUNTIME, revision: 1, models }
