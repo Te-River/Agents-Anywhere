@@ -15,7 +15,7 @@ caller has to rediscover them:
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 import httpx
@@ -25,6 +25,9 @@ from connector.runtimes.opencode.serve.service import OpenCodeService
 AUTH_USERNAME = "opencode"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_PAGE_LIMIT = 200
+#: Highest `limit` the message endpoint accepts; above it the service answers
+#: HTTP 400 `InvalidRequestError … less than or equal to 200`.
+MESSAGE_PAGE = 200
 MAX_PAGES = 200
 
 
@@ -166,6 +169,51 @@ class OpenCodeServerClient:
             if not cursor:
                 return sessions
         return sessions
+
+    async def list_messages(
+        self,
+        session_id: str,
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Collect a session's stored messages **in chronological order**.
+
+        Three measured facts shape this call (`docs/opencode-server-surface.md`):
+        the endpoint answers newest-first unless `order=asc` is asked for, its
+        default page is 50 and `limit` above 200 is a 400, and a cursor carries
+        its own order so `cursor` + `order` together is rejected outright. So the
+        first page names the order and every later page names only the cursor;
+        with `limit` the walk starts at the newest end and the slice is reversed
+        back into time order.
+        """
+        descending = limit is not None
+        want = limit if descending else MESSAGE_PAGE
+        order = "desc" if descending else "asc"
+        page_size = str(max(1, min(int(want), MESSAGE_PAGE)))
+        messages: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(MAX_PAGES):
+            params: dict[str, Any] = {"limit": page_size}
+            if cursor is None:
+                params["order"] = order
+            else:
+                params["cursor"] = cursor
+            page = await self._request("GET", f"/api/session/{session_id}/message", params=params)
+            rows = page.get("data") if isinstance(page, dict) else None
+            rows = [row for row in (rows or []) if isinstance(row, dict)]
+            if not rows:
+                break
+            messages.extend(rows)
+            if descending and limit is not None and len(messages) >= limit:
+                break
+            cursor = ((page.get("cursor") or {}) if isinstance(page, dict) else {}).get("next")
+            if not cursor:
+                break
+        if descending:
+            messages.reverse()
+            if limit is not None:
+                messages = messages[-limit:]
+        return messages
 
     async def stream_events(self) -> AsyncIterator[dict[str, Any]]:
         """Yield decoded `data:` frames from `GET /api/event` (SSE).

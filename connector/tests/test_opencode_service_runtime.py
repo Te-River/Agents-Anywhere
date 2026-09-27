@@ -70,6 +70,7 @@ class Recorder:
     def __init__(self) -> None:
         self.health: list[tuple[str, Any]] = []
         self.requests: list[tuple[str, str, Any]] = []
+        self.query: list[tuple[str, str, tuple[tuple[str, str], ...]]] = []
 
     async def runtime_health_update(self, status: str, detail: Any = None) -> None:
         self.health.append((status, detail))
@@ -85,6 +86,7 @@ def build(routes: dict[tuple[str, str], Any], values: dict[str, Any] | None = No
         body = json.loads(request.content.decode()) if request.content else None
         key = (request.method, request.url.path)
         host.requests.append((request.method, request.url.path, body))
+        host.query.append((request.method, request.url.path, tuple(sorted(request.url.params.items()))))
         outcome = routes.get(key, httpx.Response(404, json={"_tag": "NotFound"}))
         return outcome if isinstance(outcome, httpx.Response) else envelope(outcome)
 
@@ -101,9 +103,11 @@ RUNTIME_NAME = "opencode"
 
 BASE_ROUTES: dict[tuple[str, str], Any] = {
     ("GET", "/api/info"): httpx.Response(200, json={"version": "2.0.18", "pid": 18772, "urls": [], "paths": {"tmp": "T"}}),
+    ("GET", "/api/debug/location"): [{"directory": DIRECTORY}],
     ("GET", "/api/session"): SESSION_ROWS,
     ("GET", "/api/session/active"): [],
     ("GET", f"/api/session/{EXTERNAL}/message"): MESSAGES,
+    ("GET", f"/api/session/{EXTERNAL}"): httpx.Response(200, json={"data": {"id": EXTERNAL}}),
     ("GET", "/api/session/ses_child/message"): MESSAGES,
 }
 
@@ -144,7 +148,60 @@ def test_missing_registration_is_actionable_not_a_crash() -> None:
     assert "opencode serve" in detail["message"], "the message must name what the user can actually run"
 
 
+def test_a_location_the_service_never_loaded_is_named_not_shown_as_empty() -> None:
+    # `/api/session?directory=` answers `[]` for a location the host has not
+    # loaded, so "no sessions" and "wrong path typed" are the same symptom at
+    # that layer. Resolving against /api/debug/location keeps them distinct.
+    routes = dict(BASE_ROUTES)
+    routes[("GET", "/api/debug/location")] = [{"directory": "/other/place"}]
+    runtime, host = build(routes, values={"maxRestartAttempts": 0})
+
+    async def scenario() -> None:
+        await runtime.start()
+
+    run(scenario())
+    _status, detail = host.health[-1]
+    assert detail["code"] == "location_not_loaded"
+    assert DIRECTORY in detail["message"]
+    assert "/other/place" not in detail["message"], "the ask is the user's own path, not a dump of the host's"
+
+
+def test_scoped_queries_use_the_hosts_own_spelling_of_the_location() -> None:
+    # The host compares `?directory=` case-sensitively, so what goes out must be
+    # the string the host itself reports, not what was typed into the config.
+    routes = dict(BASE_ROUTES)
+    routes[("GET", "/api/debug/location")] = [{"directory": "D:\\Work\\Repo"}]
+    routes[("GET", "/api/session")] = [
+        {"id": EXTERNAL, "location": {"directory": "D:\\Work\\Repo"}, "time": {"updated": 10}}
+    ]
+    runtime, host = build(routes, values={"location": "d:/work/repo"})
+
+    async def scenario() -> Any:
+        await runtime.start()
+        return await runtime.list_complete_session_inventory()
+
+    assert [row.external_session_id for row in run(scenario())] == [EXTERNAL]
+    scoped = [call for call in host.query if call[1] in ("/api/session", "/api/model", "/api/agent", "/api/command")]
+    assert scoped, "the runtime must scope its location-bound queries"
+    for _method, _path, params in scoped:
+        assert ("directory", "D:\\Work\\Repo") in params, params
+
+
 # ------------------------------------------------------------------- inventory
+
+
+def test_inventory_rows_from_another_location_are_not_attributed_here() -> None:
+    routes = dict(BASE_ROUTES)
+    routes[("GET", "/api/session")] = SESSION_ROWS + [
+        {"id": "ses_foreign", "location": {"directory": "/somewhere/else"}, "time": {"updated": 30}}
+    ]
+    runtime, _ = build(routes)
+
+    async def scenario() -> Any:
+        await runtime.start()
+        return await runtime.list_complete_session_inventory()
+
+    assert [row.external_session_id for row in run(scenario())] == [EXTERNAL, "ses_child"]
 
 
 def test_inventory_maps_sessions_and_keeps_the_parent_link() -> None:
@@ -237,7 +294,7 @@ def test_session_id_is_resolved_through_the_inventory() -> None:
 
     snapshot = run(scenario())
     assert snapshot.external_session_id == "ses_child"
-    assert ("GET", f"/api/session/ses_child/message", None) in host.requests
+    assert ("GET", "/api/session/ses_child/message", None) in host.requests
 
 
 # ------------------------------------------------------------------- state

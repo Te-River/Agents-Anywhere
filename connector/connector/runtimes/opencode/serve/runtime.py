@@ -22,7 +22,7 @@ denylist would silently make an unrecognised (or empty) action remote-answerable
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from contextlib import suppress
 from typing import Any, Callable
 
@@ -47,6 +47,7 @@ from connector.runtime_protocol import (
     SessionNotice,
     SessionState,
 )
+from connector.runtime_protocol.filesystem import canonical_path
 from connector.runtime_protocol.host import RuntimeHostClient
 from connector.runtimes.opencode.serve import mappers
 from connector.runtimes.opencode.serve.client import (
@@ -83,6 +84,14 @@ READ_ONLY_ACTIONS = frozenset(
 )
 
 DEFAULT_PAGE_SIZE = 100
+
+
+class OpenCodeLocationNotLoaded(OpenCodeServiceUnavailable):
+    """The service answers, but it has never loaded this instance's location.
+
+    Kept distinct from "no service" because the user action differs: opening the
+    folder in OpenCode, not starting a server.
+    """
 
 #: One source of truth for what this transport can do. Provider discovery and the
 #: attached runtime both read it, so the AA descriptor can never advertise a
@@ -179,6 +188,9 @@ class OpenCodeServiceRuntime(AgentRuntime):
         self._restart_task: asyncio.Task[None] | None = None
         self._stopping = False
         self._catalog_revision = 0
+        # The host's own spelling of `location`, resolved at attach time; every
+        # location-scoped query uses it because the host compares strings.
+        self._resolved_directory: str | None = None
 
     # ------------------------------------------------------------------ identity
 
@@ -212,14 +224,19 @@ class OpenCodeServiceRuntime(AgentRuntime):
         try:
             await self._attach()
         except (OpenCodeServiceUnavailable, OpenCodeServiceError, OSError, ValueError) as error:
+            location_only = isinstance(error, OpenCodeLocationNotLoaded)
             with suppress(Exception):
                 await self.host.runtime_health_update(
                     "starting",
                     {
-                        "code": "runtime_unavailable",
+                        "code": "location_not_loaded" if location_only else "runtime_unavailable",
                         "message": (
-                            "未找到可用的 OpenCode 服务：请打开 OpenCode 桌面版，或执行 "
-                            "`opencode serve --service`。"
+                            f"OpenCode 没有加载 {self.directory}：请在 OpenCode 里打开这个项目后重试。"
+                            if location_only
+                            else (
+                                "未找到可用的 OpenCode 服务：请打开 OpenCode 桌面版，或执行 "
+                                "`opencode serve --service`。"
+                            )
                         ),
                         "retryable": True,
                         "detail": type(error).__name__,
@@ -237,17 +254,48 @@ class OpenCodeServiceRuntime(AgentRuntime):
         client = self._client_factory(service)
         try:
             info = await client.verify()
+            directory = await self._resolve_directory(client)
         except BaseException:
             await client.aclose()
             raise
         old = self._client
         self._client = client
+        self._resolved_directory = directory
         if old is not None:
             await old.aclose()
         self._identity = RuntimeIdentity(
             RUNTIME, str(info.get("version") or "unknown"), "OpenCode", runtime_id=self._runtime_id
         )
         return info
+
+    async def _resolve_directory(self, client: OpenCodeServerClient) -> str | None:
+        """Match the configured location against the directories the service loaded.
+
+        `GET /api/session?directory=` is scoped by a **case-sensitive string
+        compare** against the host's own spelling: `d:/github/agents-anywhere`
+        answers an empty list, and so does a directory the host has simply not
+        loaded (a wholly unknown path is an HTTP 500). `/api/model`, `/api/agent`
+        and `/api/command` ignore the parameter entirely, so an empty session
+        list is the only symptom of a mistyped location -- and it is
+        indistinguishable at that layer from "this project has no sessions".
+        Resolving through `/api/debug/location` and refusing to guess when
+        nothing matches turns that into a reported problem.
+        """
+        wanted = self.directory
+        if wanted is None:
+            return None
+        loaded = _rows(await client.get("/api/debug/location"))
+        target = canonical_path(wanted)
+        for row in loaded:
+            if not isinstance(row, Mapping):
+                continue
+            candidate = row.get("directory")
+            if isinstance(candidate, str) and canonical_path(candidate) == target:
+                return candidate
+        raise OpenCodeLocationNotLoaded(
+            f"the OpenCode service has not loaded {wanted!r}; its locations are "
+            f"{[str(row.get('directory')) for row in loaded if isinstance(row, Mapping)][:5]}"
+        )
 
     def _schedule_restart(self) -> None:
         if self._stopping or self._restart_task is not None:
@@ -309,7 +357,7 @@ class OpenCodeServiceRuntime(AgentRuntime):
                 unavailable_reason=row.get("reason"),
                 metadata=row.get("metadata", {}),
             )
-            for row in capability_rows(self.directory)
+            for row in capability_rows(self._resolved_directory or self.directory)
         ]
         self._catalog_revision += 1
         return RuntimeCapabilitySet(
@@ -322,6 +370,9 @@ class OpenCodeServiceRuntime(AgentRuntime):
         )
 
     # ---------------------------------------------------------------- catalogs
+    # Measured on a live service: `?directory=` does not scope these three
+    # endpoints (identical rows for every spelling, including an unknown path),
+    # so the catalogs are service-wide and the parameter is only intent here.
 
     async def list_model_catalog(self, query: str | None = None, limit: int = 100) -> RuntimeModelCatalog:
         client = await self._ensure_client()
@@ -622,7 +673,7 @@ class OpenCodeServiceRuntime(AgentRuntime):
         return client
 
     def _location_params(self) -> dict[str, str]:
-        directory = self.directory
+        directory = self._resolved_directory or self.directory
         return {"directory": directory} if directory else {}
 
     async def _inventory(self, *, force: bool = False) -> tuple[SessionMeta, ...]:
@@ -631,31 +682,54 @@ class OpenCodeServiceRuntime(AgentRuntime):
         namespace = self.host.session_namespace
         output: list[SessionMeta] = []
         seen: set[str] = set()
+        foreign = 0
         for row in rows:
+            if not self._belongs_to_location(row):
+                foreign += 1
+                continue
             meta = mappers.session_meta(row, namespace=namespace)
             if meta.session_id in seen:
                 raise RuntimeUpstreamError("OpenCode inventory repeated a session")
             seen.add(meta.session_id)
             self._external_by_session[meta.session_id] = str(meta.external_session_id)
             output.append(meta)
+        if foreign:
+            # rev3 ruling 1: `?directory=` is believed only as far as the rows
+            # themselves confirm it, and a filtered-out count is reported rather
+            # than dropped silently.
+            logger.warning(
+                "OpenCode inventory dropped rows outside the configured location",
+                {"count": foreign, "location": self._resolved_directory or self.directory},
+            )
         return tuple(output)
+
+    def _belongs_to_location(self, row: Any) -> bool:
+        if not isinstance(row, Mapping):
+            return False
+        target = self._resolved_directory or self.directory
+        if not target:
+            return True
+        location = row.get("location")
+        directory = location.get("directory") if isinstance(location, Mapping) else None
+        return isinstance(directory, str) and canonical_path(directory) == canonical_path(target)
 
     async def _snapshot(self, external: str, limit: int | None = None) -> RuntimeTimelineSnapshot:
         client = await self._ensure_client()
-        params: dict[str, str] = {}
-        if limit:
-            params["limit"] = str(limit)
-        rows = _rows(await client.get(f"/api/session/{external}/message", params))
+        rows = await client.list_messages(external, limit=limit)
         session_id = mappers.platform_session_id(self.host.session_namespace, external)
         self._external_by_session[session_id] = external
-        items = project_messages(rows, session_id=session_id)
+        projection = project_messages(rows, session_id=session_id)
         return RuntimeTimelineSnapshot(
             session_id=session_id,
             external_session_id=external,
             runtime=RUNTIME,
-            items=items,
+            items=projection.items,
             complete=not bool(limit),
-            metadata={"source": "service-http", "messages": len(rows)},
+            metadata={
+                "source": "service-http",
+                "messages": len(rows),
+                "skippedMessageTypes": dict(projection.skipped),
+            },
         )
 
     def _external(self, session_id: str) -> str | None:

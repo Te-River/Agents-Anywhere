@@ -252,6 +252,122 @@ class TestListSessions:
         assert "parentID" not in captured
 
 
+class TestListMessages:
+    """Guards the three measured quirks of `/api/session/{id}/message`.
+
+    Real 2.0.18 behaviour: rows are newest-first unless `order=asc` is asked for,
+    a `cursor` sent together with `order` is rejected with `InvalidCursorError`,
+    `limit` above 200 is an HTTP 400, and a page can offer a `next` cursor that
+    then returns nothing.
+    """
+
+    def test_asks_for_oldest_first_and_never_repeats_order_with_a_cursor(self) -> None:
+        calls: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            calls.append(params)
+            if "cursor" not in params:
+                return httpx.Response(
+                    200, json={"data": [{"id": "m1"}, {"id": "m2"}], "cursor": {"previous": None, "next": "c2"}}
+                )
+            return httpx.Response(
+                200, json={"data": [{"id": "m3"}], "cursor": {"previous": "c2", "next": None}}
+            )
+
+        client = client_for(handler)
+
+        async def run() -> None:
+            try:
+                rows = await client.list_messages("ses_1")
+                assert [row["id"] for row in rows] == ["m1", "m2", "m3"]
+                assert calls[0]["order"] == "asc"
+                assert "cursor" not in calls[0]
+                assert calls[1]["cursor"] == "c2"
+                assert "order" not in calls[1], "the host rejects cursor+order with InvalidCursorError"
+            finally:
+                await client.aclose()
+
+        asyncio.run(run())
+
+    def test_page_size_stays_inside_what_the_service_accepts(self) -> None:
+        calls: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(dict(request.url.params))
+            return httpx.Response(200, json={"data": [], "cursor": {"next": None}})
+
+        client = client_for(handler)
+
+        async def run() -> None:
+            try:
+                await client.list_messages("ses_1")
+                await client.list_messages("ses_1", limit=5000)
+            finally:
+                await client.aclose()
+
+        asyncio.run(run())
+        assert [call["limit"] for call in calls] == ["200", "200"]
+
+    def test_a_limit_reads_from_the_newest_end_and_returns_time_ascending(self) -> None:
+        calls: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(dict(request.url.params))
+            # The host's newest-first answer, as stored.
+            return httpx.Response(200, json={"data": [{"id": "m3"}, {"id": "m2"}, {"id": "m1"}], "cursor": {"next": None}})
+
+        client = client_for(handler)
+
+        async def run() -> None:
+            try:
+                rows = await client.list_messages("ses_1", limit=3)
+                assert [row["id"] for row in rows] == ["m1", "m2", "m3"]
+            finally:
+                await client.aclose()
+
+        asyncio.run(run())
+        assert calls[0]["order"] == "desc"
+
+    def test_a_limit_shorter_than_the_window_keeps_the_newest_rows(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, json={"data": [{"id": f"m{i}"} for i in range(5, 0, -1)], "cursor": {"next": None}}
+            )
+
+        client = client_for(handler)
+
+        async def run() -> None:
+            try:
+                rows = await client.list_messages("ses_1", limit=2)
+                assert [row["id"] for row in rows] == ["m4", "m5"]
+            finally:
+                await client.aclose()
+
+        asyncio.run(run())
+
+    def test_stops_on_an_empty_page_even_when_a_cursor_is_offered(self) -> None:
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            calls.append(params.get("cursor", "first"))
+            if len(calls) == 1:
+                return httpx.Response(200, json={"data": [{"id": "m1"}], "cursor": {"next": "c2"}})
+            return httpx.Response(200, json={"data": [], "cursor": {"next": "c3"}})
+
+        client = client_for(handler)
+
+        async def run() -> None:
+            try:
+                assert [row["id"] for row in await client.list_messages("ses_1")] == ["m1"]
+            finally:
+                await client.aclose()
+
+        asyncio.run(run())
+        assert calls == ["first", "c2"]
+
+
 class TestStreamEvents:
     def test_yields_frames_and_skips_heartbeats(self) -> None:
         body = (
