@@ -2,7 +2,13 @@
 
 本文件记录 `@agents-anywhere/opencode-plugin` 与 Connector 侧 OpenCode runtime 的验证状态。行为与假设的权威说明见 [README](./README.md)。
 
-> 基线：宿主 **opencode-cli 2.0.18**（Windows）。事实来源为隔离实测报告 `.git/opencode-team/20260926-213919/`（`opencode-p0`、`opencode-dist`、`opencode-probe`、`opencode-subagent`、`opencode-audit`）与仓库源码。凡未实跑的结论一律标「未验证 / 被阻塞」并附原因，不以「结构存在」冒充「已跑通」。
+> 基线：宿主 **opencode-cli 2.0.18**（Windows）。事实来源为隔离实测报告（`opencode-p0`、`opencode-dist`、`opencode-probe`、`opencode-subagent`、`opencode-audit`）与仓库源码。凡未实跑的结论一律标「未验证 / 被阻塞」并附原因，不以「结构存在」冒充「已跑通」。
+
+> **引用前缀换算**：本文所有 `opencode-<task>/<NN>-<role>-<topic>.md` 形式的引用，原写作
+> `.git/opencode-team/20260926-213919/opencode-<task>/…`。那批报告原先只存在于 `.git/` 下（不受版本控制），
+> 2026-09-27 与 8 个未推送提交一起被一次误删毁掉；现已恢复到**受版本控制**的
+> [`evidence/20260926-213919/`](./evidence/20260926-213919/)，逐份出处与可信度分级见
+> [RECOVERY.md](./evidence/20260926-213919/RECOVERY.md)。旧路径不再存在，遇到请按此换算。
 
 ## 一、自动化检查（本地已执行）
 
@@ -123,8 +129,8 @@ uv run pytest tests/test_opencode_provider.py tests/test_opencode_bridge_client.
 
 ```powershell
 # 装置与判定原文见：
-#   .git/opencode-team/20260926-213919/opencode-dist/03-implementer-git-spec-install-layout-probe.md §7
-#   .git/opencode-team/20260926-213919/opencode-subagent/02-implementer-child-session-event-flow-spike.md §1
+#   evidence/20260926-213919/opencode-dist/03-implementer-git-spec-install-layout-probe.md §7
+#   evidence/20260926-213919/opencode-subagent/02-implementer-child-session-event-flow-spike.md §1
 ```
 
 ## 六、手动验收清单（需有 TTY 与可用模型的真机）
