@@ -38,13 +38,13 @@ Agent Runtime Protocol
 Runtime adapters
   - Codex
   - Claude
-  - OpenCode
+  - OpenCode (implemented; plugin-side loopback bridge)
   - ACP
         |
 Native runtime process, SDK, IPC, local history, and filesystem state
 ```
 
-The Connector application layer must not know Codex IPC, Claude SDK, or runtime-native selection details. Runtime adapters must not know server notification method names such as `timeline.itemUpsert` or `protocol.modelCatalogUpdated`. They call the host client instead.
+The Connector application layer must not know Codex IPC, Claude SDK, or runtime-native selection details. Runtime adapters must not know server notification method names such as `timeline.itemUpsert` or `protocol.modelCatalogUpdated`. They call the host client instead. The OpenCode adapter is implemented and attaches over a loopback JSON-RPC bridge to the in-process OpenCode plugin, which lives in a separate package — see [opencode-plugin/README.md](../../opencode-plugin/README.md).
 
 ## Domain model
 

@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { CascadingSelector } from "@/components/cascading-selector"
 import { useSessionToolSidebarStore } from "@/components/session-tool-sidebar-state"
-import { AgentSelectionDrawer } from "@/components/session/agent-selection-drawer"
+import { DeviceRuntimeSelectionDrawer } from "@/components/session/device-runtime-selection-drawer"
 import { SelectionSettingsDrawer } from "@/components/session/selection-settings-drawer"
 import {
   AttachmentButton,
@@ -250,7 +250,7 @@ export function TaskComposer() {
     onlineConnectors[0] ??
     null
   const selectedConnectorId = selectedConnector?.id ?? ""
-  const agentOptions = React.useMemo(
+  const runtimeOptions = React.useMemo(
     () => selectedConnector
       ? activeRuntimes(runtimeInventory[selectedConnector.id]).map((runtime) => ({
           id: runtime.runtimeId,
@@ -260,9 +260,9 @@ export function TaskComposer() {
     [runtimeInventory, selectedConnector],
   )
 
-  const [selectedAgent, setSelectedAgent] = React.useState(agentOptions[0]?.id ?? "")
+  const [selectedRuntimeId, setSelectedRuntimeId] = React.useState(runtimeOptions[0]?.id ?? "")
   const selectedRuntime = activeRuntimes(runtimeInventory[selectedConnectorId])
-    .find((runtime) => runtime.runtimeId === selectedAgent) ?? null
+    .find((runtime) => runtime.runtimeId === selectedRuntimeId) ?? null
   const selectedRuntimeScope = selectedRuntime
     ? { runtimeId: selectedRuntime.runtimeId, runtimeType: selectedRuntime.runtimeType }
     : undefined
@@ -313,16 +313,16 @@ export function TaskComposer() {
 
   const persistTargetPreference = React.useCallback((
     connectorId: string,
-    agent: string,
+    runtimeId: string,
     selection: Partial<NewSessionSelectionPreference> = {},
   ) => {
-    if (!preferenceLoaded || !connectorId || !agent) return
-    const scope = newSessionSelectionScope(connectorId, agent)
+    if (!preferenceLoaded || !connectorId || !runtimeId) return
+    const scope = newSessionSelectionScope(connectorId, runtimeId)
     const existing = preferenceRef.current?.selections?.[scope]
     persistPreference(withNewSessionSelectionPreference(
       preferenceRef.current,
       connectorId,
-      agent,
+      runtimeId,
       {
         model: selection.model !== undefined ? selection.model : existing?.model ?? null,
         permission: selection.permission !== undefined ? selection.permission : existing?.permission ?? null,
@@ -387,17 +387,17 @@ export function TaskComposer() {
       ? preference.agent
       : null
     const nextAgent = preferredAvailableOptionId(
-      agentOptions,
-      selectedAgent,
+      runtimeOptions,
+      selectedRuntimeId,
       preferredAgent,
     )
-    if (nextAgent !== selectedAgent) {
-      setSelectedAgent(nextAgent)
+    if (nextAgent !== selectedRuntimeId) {
+      setSelectedRuntimeId(nextAgent)
     }
-  }, [agentOptions, preference, preferenceLoaded, selectedAgent, selectedConnectorId])
+  }, [runtimeOptions, preference, preferenceLoaded, selectedRuntimeId, selectedConnectorId])
 
   React.useEffect(() => {
-    if (!authSession?.accessToken || !selectedConnectorId || !selectedAgent) {
+    if (!authSession?.accessToken || !selectedConnectorId || !selectedRuntimeId) {
       setModelCatalog(null)
       setPermissionCatalog(null)
       setRuntimeCapabilities(null)
@@ -412,7 +412,7 @@ export function TaskComposer() {
     dashboardApi.getConnectorRuntimeCapabilities(
       authSession.accessToken,
       selectedConnectorId,
-      selectedAgent,
+      selectedRuntimeId,
     )
       .then(async (capabilitiesResponse) => {
         const capabilitySet = capabilitiesResponse.capabilitySet
@@ -431,14 +431,14 @@ export function TaskComposer() {
             ? dashboardApi.getConnectorRuntimeModelCatalog(
                 authSession.accessToken,
                 selectedConnectorId,
-                selectedAgent,
+                selectedRuntimeId,
               )
             : Promise.resolve(null),
           canUsePermissionCatalog
             ? dashboardApi.getConnectorRuntimePermissionCatalog(
                 authSession.accessToken,
                 selectedConnectorId,
-                selectedAgent,
+                selectedRuntimeId,
               )
             : Promise.resolve(null),
         ])
@@ -462,7 +462,7 @@ export function TaskComposer() {
     return () => {
       cancelled = true
     }
-  }, [authSession?.accessToken, selectedAgent, selectedConnectorId, selectedRuntime?.runtimeType])
+  }, [authSession?.accessToken, selectedRuntimeId, selectedConnectorId, selectedRuntime?.runtimeType])
 
   const canUseModelCatalog = capabilityIsUsable(
     runtimeCapabilities,
@@ -555,9 +555,9 @@ export function TaskComposer() {
   }, [reasoningOptions])
 
   React.useEffect(() => {
-    if (!preferenceLoaded || !selectedConnectorId || !selectedAgent) return
+    if (!preferenceLoaded || !selectedConnectorId || !selectedRuntimeId) return
     if (catalogsLoading || (!modelCatalog && !permissionCatalog)) return
-    const scope = newSessionSelectionScope(selectedConnectorId, selectedAgent)
+    const scope = newSessionSelectionScope(selectedConnectorId, selectedRuntimeId)
     const selectionPreference = preference?.selections?.[scope]
     if (!selectionPreference) return
 
@@ -582,7 +582,7 @@ export function TaskComposer() {
     preference,
     preferenceLoaded,
     catalogsLoading,
-    selectedAgent,
+    selectedRuntimeId,
     selectedConnectorId,
   ])
 
@@ -605,7 +605,7 @@ export function TaskComposer() {
       : targetOptions[0]?.runtimeId ?? ""
     setSelectedDevice(connectorId)
     if (nextAgent) {
-      setSelectedAgent(nextAgent)
+      setSelectedRuntimeId(nextAgent)
       persistTargetPreference(connectorId, nextAgent)
     }
   }, [persistTargetPreference, runtimeInventory])
@@ -623,32 +623,32 @@ export function TaskComposer() {
     return project
   }, [createProject, handleDeviceChange])
 
-  const handleAgentChange = React.useCallback((agent: string) => {
-    if (!selectedConnectorId || !agentOptions.some((option) => option.id === agent)) return
-    setSelectedAgent(agent)
-    persistTargetPreference(selectedConnectorId, agent)
-  }, [agentOptions, persistTargetPreference, selectedConnectorId])
+  const handleRuntimeChange = React.useCallback((runtimeId: string) => {
+    if (!selectedConnectorId || !runtimeOptions.some((option) => option.id === runtimeId)) return
+    setSelectedRuntimeId(runtimeId)
+    persistTargetPreference(selectedConnectorId, runtimeId)
+  }, [runtimeOptions, persistTargetPreference, selectedConnectorId])
 
   const handlePermissionChange = React.useCallback((permission: string) => {
-    if (!selectedConnectorId || !selectedAgent) return
+    if (!selectedConnectorId || !selectedRuntimeId) return
     if (!permissionOptions.some((option) => option.id === permission && option.enabled)) return
     setSelectedPermissionMode(permission)
-    persistTargetPreference(selectedConnectorId, selectedAgent, {
+    persistTargetPreference(selectedConnectorId, selectedRuntimeId, {
       permission: selectionIdForPermissionCatalog(permissionCatalog, permission),
     })
-  }, [permissionCatalog, permissionOptions, persistTargetPreference, selectedAgent, selectedConnectorId])
+  }, [permissionCatalog, permissionOptions, persistTargetPreference, selectedRuntimeId, selectedConnectorId])
 
   const handleModelChange = React.useCallback((model: string, reasoning: string) => {
-    if (!selectedConnectorId || !selectedAgent) return
+    if (!selectedConnectorId || !selectedRuntimeId) return
     const modelOption = models.find((option) => option.id === model)
     if (!modelOption?.enabled) return
     if (reasoning && !modelOption.reasoningItems.some((option) => option.id === reasoning && option.enabled)) return
     setSelectedModel(model)
     setSelectedReasoning(reasoning)
-    persistTargetPreference(selectedConnectorId, selectedAgent, {
+    persistTargetPreference(selectedConnectorId, selectedRuntimeId, {
       model: selectionIdForModelCatalog(modelCatalog, model, reasoning),
     })
-  }, [modelCatalog, models, persistTargetPreference, selectedAgent, selectedConnectorId])
+  }, [modelCatalog, models, persistTargetPreference, selectedRuntimeId, selectedConnectorId])
 
   const requiresModelSelection = canUseModelCatalog && models.length > 0
   const requiresPermissionSelection = canUsePermissionCatalog && permissionOptions.length > 0
@@ -664,7 +664,7 @@ export function TaskComposer() {
     (prompt.trim().length > 0 || attachments.length > 0)
   const selectorsLoading =
     runtimeInventoryLoading || (
-      Boolean(authSession?.accessToken && hasOnlineDevice && selectedConnector && selectedAgent) && catalogsLoading
+      Boolean(authSession?.accessToken && hasOnlineDevice && selectedConnector && selectedRuntimeId) && catalogsLoading
     )
   const compactSelectors = composerWidth > 0 && composerWidth < 640
   const showCollapsedBrand = isMobile || sidebarState === "collapsed"
@@ -698,9 +698,9 @@ export function TaskComposer() {
       connectorId: selectedConnector.id,
       projectId: project.id,
       connectorStatus: selectedConnector.status,
-      runtime: selectedRuntime?.runtimeType ?? selectedAgent,
-      runtimeId: selectedRuntime?.runtimeId ?? selectedAgent,
-      runtimeType: selectedRuntime?.runtimeType ?? selectedAgent,
+      runtime: selectedRuntime?.runtimeType ?? selectedRuntimeId,
+      runtimeId: selectedRuntime?.runtimeId ?? selectedRuntimeId,
+      runtimeType: selectedRuntime?.runtimeType ?? selectedRuntimeId,
       runtimeName: selectedRuntime ? runtimeInstanceName(selectedRuntime) : null,
       runtimeTypeDisplayName: selectedRuntime ? runtimeTypeName(selectedRuntime) : null,
       externalSessionId: null,
@@ -726,9 +726,9 @@ export function TaskComposer() {
     }
     const optimisticState = {
       sessionId: localSessionId,
-      runtime: selectedRuntime?.runtimeType ?? selectedAgent,
-      runtimeId: selectedRuntime?.runtimeId ?? selectedAgent,
-      runtimeType: selectedRuntime?.runtimeType ?? selectedAgent,
+      runtime: selectedRuntime?.runtimeType ?? selectedRuntimeId,
+      runtimeId: selectedRuntime?.runtimeId ?? selectedRuntimeId,
+      runtimeType: selectedRuntime?.runtimeType ?? selectedRuntimeId,
       externalSessionId: null,
       status: "waiting" as const,
       selections: {
@@ -769,8 +769,8 @@ export function TaskComposer() {
         connectorId: selectedConnector.id,
         projectId: project.id,
         ...sessionRuntimeRequestIdentity(
-          selectedRuntime?.runtimeType ?? selectedAgent,
-          selectedRuntime?.runtimeId ?? selectedAgent,
+          selectedRuntime?.runtimeType ?? selectedRuntimeId,
+          selectedRuntime?.runtimeId ?? selectedRuntimeId,
         ),
         title: prompt.trim() || undefined,
         cwd: project.workspacePath,
@@ -783,7 +783,7 @@ export function TaskComposer() {
       const nextPreference = withNewSessionSelectionPreference(
         preferenceRef.current,
         selectedConnector.id,
-        selectedAgent,
+        selectedRuntimeId,
         {
           model: selectedModelSelection,
           permission: selectedPermissionSelection,
@@ -885,27 +885,27 @@ export function TaskComposer() {
             ) : (
               <>
                 {hasOnlineDevice && compactSelectors ? (
-                  <AgentSelectionDrawer
+                  <DeviceRuntimeSelectionDrawer
                     buttonLabel={t("agent")}
                     title={t("deviceAndAgent")}
                     deviceLabel={t("device")}
-                    agentLabel={t("agent")}
+                    runtimeLabel={t("agent")}
                     deviceItems={deviceOptions}
                     selectedDevice={selectedDevice}
                     onDeviceChange={handleDeviceChange}
-                    agentItems={agentOptions}
-                    selectedAgent={selectedAgent}
-                    onAgentChange={handleAgentChange}
+                    runtimeItems={runtimeOptions}
+                    selectedRuntime={selectedRuntimeId}
+                    onRuntimeChange={handleRuntimeChange}
                   />
                 ) : hasOnlineDevice ? (
                   <CascadingSelector
                     icon={<Monitor className="size-4" />}
                     primaryOptions={deviceOptions}
-                    secondaryOptions={agentOptions}
+                    secondaryOptions={runtimeOptions}
                     selectedPrimary={selectedDevice}
-                    selectedSecondary={selectedAgent}
+                    selectedSecondary={selectedRuntimeId}
                     onPrimaryChange={handleDeviceChange}
-                    onSecondaryChange={handleAgentChange}
+                    onSecondaryChange={handleRuntimeChange}
                     secondaryLabel={t("agent")}
                   />
                 ) : null}

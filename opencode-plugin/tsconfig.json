@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "strict": true,
+    "noEmit": true,
+    // The package root `index.ts` forwarder must use a `./x.ts` specifier: the
+    // host's `file:` loader resolves it with Bun, which requires the extension.
+    // Safe here because this project never emits (`noEmit: true`).
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": false
+  },
+  "files": []
+}

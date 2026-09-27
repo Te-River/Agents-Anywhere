@@ -237,7 +237,7 @@ function nextOptimisticRuntimeState(
 
 function selectionPatchFromComposerSelections(
   current: Record<string, string | null>,
-  selections: { model?: string; permission?: string },
+  selections: { model?: string; permission?: string; agent?: string },
 ): Record<string, string | null> {
   const patch: Record<string, string | null> = {}
   if (selections.model && selections.model !== current.model) {
@@ -245,6 +245,9 @@ function selectionPatchFromComposerSelections(
   }
   if (selections.permission && selections.permission !== current.permission) {
     patch.permission = selections.permission
+  }
+  if (selections.agent && selections.agent !== current.agent) {
+    patch.agent = selections.agent
   }
   return patch
 }
@@ -421,6 +424,11 @@ export function SessionDetail({
       effectiveCapabilities &&
       capabilityIsUsable(effectiveCapabilities, CAPABILITY.permissionCatalog, sessionRuntimeScope),
   )
+  const canUseAgentCatalog = Boolean(
+    sessionRuntime &&
+      effectiveCapabilities &&
+      capabilityIsUsable(effectiveCapabilities, CAPABILITY.agentCatalog, sessionRuntimeScope),
+  )
   const commandSessionId = session?.id ?? null
 
   React.useEffect(() => {
@@ -493,7 +501,7 @@ export function SessionDetail({
   }, [])
 
   const handleSelectionChange = async (
-    selections: { model?: string; permission?: string },
+    selections: { model?: string; permission?: string; agent?: string },
   ): Promise<boolean> => {
     if (!session) return false
     const selectionPatch = selectionPatchFromComposerSelections(state?.state?.selections ?? {}, selections)
@@ -615,12 +623,14 @@ export function SessionDetail({
     if (!runtime) return
     const needsModelCatalog = canUseModelCatalog && !state?.catalogs.model
     const needsPermissionCatalog = canUsePermissionCatalog && !state?.catalogs.permission
-    if (!needsModelCatalog && !needsPermissionCatalog) return
+    const needsAgentCatalog = canUseAgentCatalog && !state?.catalogs.agent
+    if (!needsModelCatalog && !needsPermissionCatalog && !needsAgentCatalog) return
     const catalogFetchKey = [
       sessionId,
       runtime,
       needsModelCatalog ? "model" : "no-model",
       needsPermissionCatalog ? "permission" : "no-permission",
+      needsAgentCatalog ? "agent" : "no-agent",
     ].join(":")
     if (catalogFetchKeyRef.current === catalogFetchKey) return
     catalogFetchKeyRef.current = catalogFetchKey
@@ -633,8 +643,11 @@ export function SessionDetail({
       needsPermissionCatalog
         ? dashboardApi.getSessionPermissionCatalog(token, sessionId)
         : Promise.resolve(null),
+      needsAgentCatalog
+        ? dashboardApi.getSessionAgentCatalog(token, sessionId)
+        : Promise.resolve(null),
     ])
-      .then(([modelCatalogResponse, permissionCatalogResponse]) => {
+      .then(([modelCatalogResponse, permissionCatalogResponse, agentCatalogResponse]) => {
         if (cancelled) return
         setState((current) => {
           if (!current || current.session.id !== sessionId) return current
@@ -646,6 +659,7 @@ export function SessionDetail({
               ...(permissionCatalogResponse
                 ? { permission: permissionCatalogResponse.catalog }
                 : {}),
+              ...(agentCatalogResponse ? { agent: agentCatalogResponse.catalog } : {}),
             },
           }
         })
@@ -667,10 +681,12 @@ export function SessionDetail({
   }, [
     canUseModelCatalog,
     canUsePermissionCatalog,
+    canUseAgentCatalog,
     sessionId,
     sessionRuntime,
     state?.catalogs.model,
     state?.catalogs.permission,
+    state?.catalogs.agent,
     token,
   ])
 
@@ -1178,7 +1194,7 @@ export function SessionDetail({
   const handleSend = async (
     content: string,
     attachments: AttachedFile[],
-    selections: { model?: string; permission?: string },
+    selections: { model?: string; permission?: string; agent?: string },
   ): Promise<boolean> => {
     if (!session || (!content.trim() && attachments.length === 0)) return false
     const uploadedAttachments = attachments.flatMap((attachment) =>
@@ -1788,6 +1804,7 @@ export function SessionDetail({
             effectiveCapabilities={state?.effectiveCapabilities ?? null}
             modelCatalog={state?.catalogs.model ?? null}
             permissionCatalog={state?.catalogs.permission ?? null}
+            agentCatalog={state?.catalogs.agent ?? null}
             runtimeCommands={runtimeCommands}
             commandsLoading={commandsLoading}
             onCommandQueryChange={handleCommandQueryChange}
