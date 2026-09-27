@@ -1,8 +1,9 @@
 # OpenCode 宿主自带服务面（2.0.18 实测）
 
 本文只记**实测事实**与**复现方法**，不记计划。它是「把 OpenCode 接入从宿主内插件改为
-Agents Anywhere 侧对端中转」这一形态决策的判据来源；插件侧的结论与未验证项仍记在
-[`opencode-plugin/VERIFICATION.md`](../opencode-plugin/VERIFICATION.md)。
+Agents Anywhere 侧对端中转」这一形态决策的判据来源；插件形态那轮的结论与未验证项仍记在
+[`docs/opencode-plugin-evidence/VERIFICATION.md`](opencode-plugin-evidence/VERIFICATION.md)
+（该目录是插件退役时从 `opencode-plugin/` 原样保留下来的取证报告，插件代码本身已删除）。
 
 实测环境：`opencode v2.0.18`（桌面 App `@opencode-aidesktop` 内嵌 CLI），Windows 11。
 所有对活实例的访问都是只读 `GET`；写面形状取自实例自报的 OpenAPI 规格，**除字段名/必填键外未实际触发**

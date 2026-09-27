@@ -154,15 +154,16 @@ machine-wide service in `$XDG_STATE_HOME/opencode/service.json` (or start one wi
 inside it. Each runtime instance binds one `(servicePid, location)` pair, so
 `location` scopes the session inventory and is required for complete discovery.
 Endpoint semantics, measured quirks and the reproduction commands live in
-[docs/opencode-server-surface.md](../docs/opencode-server-surface.md); the
-superseded in-process plugin form is described in
-[opencode-plugin/README.md](../opencode-plugin/README.md). OpenCode also publishes
+[docs/opencode-server-surface.md](../docs/opencode-server-surface.md). OpenCode also publishes
 its agent and model directories (`GET /api/agent`, `GET /api/model`), surfaced to
 the server as the generic `runtime.agentCatalog` RPC and pushed as the
 `agent_catalog_update` notification when the host announces a change. Note that
 the model catalog keys on `providerID/modelID` because the host repeats bare ids
 across providers, and those two endpoints are service-wide — `?directory=` does
-not scope them. Legacy ACP adapters are not part of the default provider registry.
+not scope them. This runtime reports attachments and mid-turn steering as
+unavailable: the host has no attachment upload on this surface, and `steer` is
+only declared as a `delivery` mode on prompt, unproven against a live turn.
+Legacy ACP adapters are not part of the default provider registry.
 
 The connector uses local runtime credentials and local filesystem permissions.
 Agents Anywhere does not proxy Claude or Codex account credentials.

@@ -11,8 +11,8 @@ _LOOPBACK_REDIRECT_RE = re.compile(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})/oauth
 def allows_loopback_redirect(uri: str) -> bool:
     """Accept only an exact ``127.0.0.1`` callback on an unprivileged port.
 
-    Shared by every first-party client that binds an ephemeral local port
-    (the DSH plug-in and the OpenCode plug-in) so the boundary stays identical.
+    Shared by every first-party client that binds an ephemeral local port (the
+    DSH and OpenCode plug-in client ids) so the boundary stays identical.
     """
 
     match = _LOOPBACK_REDIRECT_RE.fullmatch(uri)
@@ -77,9 +77,13 @@ def device_grant_oauth_client(client_id: str) -> FirstPartyOAuthClient | None:
     """The only first-party client allowed to use the device grant.
 
     Mobile and desktop sign in through their own redirect URIs, so the device
-    authorization grant stays scoped to the OpenCode plug-in.  Any other
+    authorization grant stays scoped to the OpenCode client id.  Any other
     client id, first-party or not, is treated as unknown by the device
     endpoints.
+
+    Note: the OpenCode runtime no longer ships a plug-in to start this flow --
+    the connector attaches to the host's own service and pairs with a connector
+    token.  The grant and its approval page remain for a native initiator.
     """
 
     client = first_party_oauth_client(client_id)

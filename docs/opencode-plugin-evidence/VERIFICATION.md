@@ -11,7 +11,7 @@
 > [RECOVERY.md](./evidence/20260926-213919/RECOVERY.md)。旧路径不再存在，遇到请按此换算。
 
 > 形态决策（把 OpenCode 接入改为 Agents Anywhere 侧对端中转）的实测判据集中在
-> [`docs/opencode-server-surface.md`](../docs/opencode-server-surface.md)：
+> [`docs/opencode-server-surface.md`](../opencode-server-surface.md)：
 > 服务发现（`service.json` + `GET /api/info` + Basic）、location 用 `?directory=` 而非请求头、
 > 会话与子会话可全量枚举（本目录 83 条 / 76 条带 `parentID`）、目录面（91 个插件含 `failed` 态、
 > 79 个模型含跨 provider 重复 `id`、16 个 skill、13 个 agent 含 7 个 subagent）、事件词表
