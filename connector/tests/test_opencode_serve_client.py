@@ -220,9 +220,9 @@ class TestListSessions:
 
         async def run() -> None:
             try:
-                rows = await client.list_sessions(directory="D:/proj", parent_id="null", limit=50)
+                rows = await client.list_sessions(directory="/work/repo", parent_id="null", limit=50)
                 assert [r["id"] for r in rows] == ["ses_1", "ses_2", "ses_3"]
-                assert calls[0]["directory"] == "D:/proj"
+                assert calls[0]["directory"] == "/work/repo"
                 assert calls[0]["parentID"] == "null"
                 assert calls[0]["limit"] == "50"
                 assert "parentID" not in calls[1] or calls[1]["parentID"] == "null"

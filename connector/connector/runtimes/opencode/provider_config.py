@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-from connector.paths import DATA_DIR_ENV, DATA_DIR_NAME
 from connector.runtime_protocol import RuntimeInvalidRequestError
 from connector.runtime_protocol.filesystem import canonical_path
 
@@ -12,9 +11,6 @@ DEFAULT_STARTUP_TIMEOUT_MS = 30_000
 DEFAULT_REQUEST_TIMEOUT_MS = 60_000
 DEFAULT_MAX_RESTART_ATTEMPTS = 3
 DEFAULT_RESTART_BACKOFF_MS = 1_000
-
-BRIDGE_DIR_NAME = "opencode-bridge"
-ENDPOINTS_DIR_NAME = "endpoints"
 
 # rev3 ruling 2: partial session discovery rides this capability row's
 # metadata (``discoveryState`` in {"complete","partial"}), never the boolean
@@ -28,23 +24,23 @@ def opencode_config_schema() -> dict[str, Any]:
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
-            "registryDir": {
+            "stateDir": {
                 "type": "string",
                 "minLength": 1,
-                "title": "OpenCode bridge registry",
-                "description": "Optional absolute directory holding the loopback endpoint files; defaults to the per-user OpenCode bridge directory.",
+                "title": "OpenCode state directory",
+                "description": "Directory holding OpenCode's `opencode/service.json` registration; defaults to `$XDG_STATE_HOME` (or `~/.local/state`).",
             },
             "servicePid": {
                 "type": "integer",
                 "minimum": 1,
                 "title": "OpenCode service PID",
-                "description": "Target OpenCode service process. One runtime instance binds each (servicePid, location) pair.",
+                "description": "Optional pin: refuse to attach unless the registered service reports this pid. One runtime instance binds each (servicePid, location) pair.",
             },
             "location": {
                 "type": "string",
                 "minLength": 1,
                 "title": "OpenCode location",
-                "description": "Absolute project location served by this instance.",
+                "description": "Absolute project location served by this instance; scopes the session inventory.",
             },
             "startupTimeoutMs": {**positive_timeout, "default": DEFAULT_STARTUP_TIMEOUT_MS},
             "requestTimeoutMs": {**positive_timeout, "default": DEFAULT_REQUEST_TIMEOUT_MS},
@@ -53,7 +49,7 @@ def opencode_config_schema() -> dict[str, Any]:
                 "minimum": 0,
                 "maximum": 10,
                 "default": DEFAULT_MAX_RESTART_ATTEMPTS,
-                "description": "Fast attach attempts before polling the local bridge registry every 5 seconds.",
+                "description": "Attach attempts before the runtime stops retrying.",
             },
             "restartBackoffMs": {**positive_timeout, "default": DEFAULT_RESTART_BACKOFF_MS},
         },
@@ -72,14 +68,14 @@ def default_config_values() -> dict[str, Any]:
 
 def normalized_config_values(raw: dict[str, Any]) -> dict[str, Any]:
     values = {**default_config_values(), **raw}
-    registry = values.get("registryDir")
-    if registry is not None:
+    state_dir = values.get("stateDir")
+    if state_dir is not None:
         if (
-            not isinstance(registry, str)
-            or not Path(registry).expanduser().is_absolute()
+            not isinstance(state_dir, str)
+            or not Path(state_dir).expanduser().is_absolute()
         ):
-            raise RuntimeInvalidRequestError("registryDir must be an absolute path")
-        values["registryDir"] = canonical_path(registry)
+            raise RuntimeInvalidRequestError("stateDir must be an absolute path")
+        values["stateDir"] = canonical_path(state_dir)
     pid = values.get("servicePid")
     if pid is not None and (
         not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0
@@ -114,18 +110,20 @@ def normalized_config_values(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def registry_dir(values: dict[str, Any]) -> Path:
-    """Resolve the endpoints directory without creating it.
+    """Directory holding OpenCode's service registration, without creating it.
 
     Follows the ``connector/paths.py`` ``.agents-anywhere`` convention so a
-    self-hosted data directory override keeps working.
+    self-hosted data directory override keeps working: an explicit ``stateDir``
+    wins, otherwise ``$XDG_STATE_HOME`` (or ``~/.local/state``) as OpenCode itself
+    resolves it.
     """
 
-    configured = values.get("registryDir")
-    if isinstance(configured, str):
+    configured = values.get("stateDir")
+    if isinstance(configured, str) and configured:
         return Path(canonical_path(configured))
-    override = os.environ.get(DATA_DIR_ENV)
-    base = Path(override).expanduser() if override else Path.home() / DATA_DIR_NAME
-    return Path(canonical_path(base / BRIDGE_DIR_NAME / ENDPOINTS_DIR_NAME))
+    override = os.environ.get("XDG_STATE_HOME")
+    base = Path(override).expanduser() if override else Path.home() / ".local" / "state"
+    return Path(canonical_path(base / "opencode"))
 
 
 def opencode_capabilities(reported: dict[str, Any] | None = None) -> dict[str, bool]:

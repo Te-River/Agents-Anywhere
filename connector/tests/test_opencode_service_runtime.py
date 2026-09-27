@@ -30,7 +30,9 @@ from connector.runtimes.opencode.serve import mappers
 SERVICE = OpenCodeService(
     url="http://127.0.0.1:49374", pid=18772, version="2.0.18", password="pw", path=__import__("pathlib").Path("s.json")
 )
-DIRECTORY = "D:/Github/Agents-Anywhere"
+# Opaque paths: the runtime only forwards/echoes them, so nothing here may
+# depend on a directory that exists on the machine running the tests.
+DIRECTORY = "/work/repo"
 EXTERNAL = "ses_f22107110ffdwOAm3Bcv9JiTBV"
 # Agents Anywhere addresses a session by the id derived from the inventory, exactly
 # as the production caller does after list_sessions().
@@ -276,7 +278,7 @@ def _permission_routes(rows: list[dict[str, Any]]) -> dict[tuple[str, str], Any]
 
 
 def test_permission_notice_exposes_actions_and_context() -> None:
-    runtime, _ = build(_permission_routes([{"id": "per_1", "action": "read", "resources": ["D:/x/y.ts"]}]))
+    runtime, _ = build(_permission_routes([{"id": "per_1", "action": "read", "resources": ["/work/repo/src/a.ts"]}]))
 
     async def scenario() -> Any:
         await runtime.start()
@@ -286,11 +288,11 @@ def test_permission_notice_exposes_actions_and_context() -> None:
     assert len(notices) == 1
     assert notices[0].notice_id == "per_1"
     assert [item["actionId"] for item in notices[0].actions] == ["allow_once", "deny"]
-    assert notices[0].context["resources"] == ["D:/x/y.ts"]
+    assert notices[0].context["resources"] == ["/work/repo/src/a.ts"]
 
 
 def test_high_risk_notice_cannot_be_answered_remotely() -> None:
-    runtime, host = build(_permission_routes([{"id": "per_2", "action": "write", "resources": ["D:/x"]}]))
+    runtime, host = build(_permission_routes([{"id": "per_2", "action": "write", "resources": ["/work/repo/x"]}]))
 
     async def scenario() -> Any:
         await runtime.start()

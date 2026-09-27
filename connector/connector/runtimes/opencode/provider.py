@@ -15,34 +15,36 @@ from connector.runtime_protocol import (
     RuntimeSourceKey,
     RuntimeTypeDescriptor,
 )
-from connector.runtime_protocol.filesystem import filesystem_resource_key
+from connector.runtime_protocol.filesystem import canonical_path, filesystem_resource_key
 from connector.runtime_protocol.host import RuntimeHostClient
-from connector.runtimes.opencode import discovery, provider_config
-from connector.runtimes.opencode.runtime import OpenCodeRuntime
+from connector.runtimes.opencode import provider_config
+from connector.runtimes.opencode.serve import discovery as serve_discovery
+from connector.runtimes.opencode.serve.runtime import OpenCodeServiceRuntime
+from connector.runtimes.opencode.serve.service import read_service
 
-OPENCODE_CONFIG_SCHEMA_REVISION = 1
+OPENCODE_CONFIG_SCHEMA_REVISION = 2
 
-Discovery = Callable[[Mapping[str, Any]], Awaitable[discovery.OpenCodeDiscovery]]
-Probe = Callable[[Mapping[str, Any]], Awaitable[discovery.OpenCodeDiscovery]]
+Discovery = Callable[[Mapping[str, Any]], Awaitable[serve_discovery.ServiceDiscovery]]
+Probe = Callable[[Mapping[str, Any]], Awaitable[serve_discovery.ServiceDiscovery]]
 
 
 class OpenCodeProvider(RuntimeProvider):
-    """OpenCode V2 runtime: attach to a loopback bridge, one instance per location."""
+    """OpenCode runtime that attaches to the host's own service over HTTP."""
 
     def __init__(
         self,
         discoverer: Discovery | None = None,
         prober: Probe | None = None,
     ) -> None:
-        self._discoverer = discoverer or discovery.discover
+        self._discoverer = discoverer or serve_discovery.discover
         # Reachability is a configuration/start concern. Callers that inject a
         # discoverer (tests, embedders) keep using it for both so a single fake
         # still drives the whole provider surface.
-        self._prober = prober or discoverer or discovery.probe
-        self._last_discovery: discovery.OpenCodeDiscovery | None = None
+        self._prober = prober or discoverer or serve_discovery.probe
+        self._last_discovery: serve_discovery.ServiceDiscovery | None = None
         self._last_values = provider_config.default_config_values()
 
-    def _remember(self, result: discovery.OpenCodeDiscovery) -> None:
+    def _remember(self, result: serve_discovery.ServiceDiscovery) -> None:
         self._last_discovery = result
 
     @property
@@ -71,21 +73,19 @@ class OpenCodeProvider(RuntimeProvider):
 
     @property
     def description(self) -> str:
-        return "OpenCode V2 loopback bridge runtime"
+        return "OpenCode host service runtime (HTTP/SSE, nothing installed in OpenCode)"
 
     async def discover(self) -> RuntimeTypeDescriptor:
-        """Report the supported runtime type. Bridge reachability is not discovery."""
+        """Report the supported runtime type. Service reachability is not discovery."""
 
         values = self._last_values
         result = await self._discoverer(values)
         self._remember(result)
         metadata = dict(result.metadata or {})
-        capabilities = provider_config.opencode_capabilities(
-            metadata.get("runtimeCapabilities")
-        )
+        capabilities = provider_config.opencode_capabilities(metadata.get("runtimeCapabilities"))
         metadata.update(
             {
-                "protocolVersion": "1.0",
+                "transport": "service-http",
                 "storageMode": "opencode-native",
                 "sameSessionWriterLimit": 1,
                 "crossProcessWriterExclusion": False,
@@ -123,7 +123,7 @@ class OpenCodeProvider(RuntimeProvider):
             schema=provider_config.opencode_config_schema(),
             ui_schema={
                 "order": [
-                    "registryDir",
+                    "stateDir",
                     "servicePid",
                     "location",
                     "startupTimeoutMs",
@@ -131,7 +131,7 @@ class OpenCodeProvider(RuntimeProvider):
                     "maxRestartAttempts",
                     "restartBackoffMs",
                 ],
-                "registryDir": {"component": "path"},
+                "stateDir": {"component": "path"},
             },
             defaults=provider_config.default_config_values(),
             metadata={
@@ -160,14 +160,14 @@ class OpenCodeProvider(RuntimeProvider):
         self._remember(result)
         self._last_values = normalized
         # Offline is temporary, not an invalid configuration. The runtime owns
-        # reconnection and re-reads the registry when a bridge appears.
+        # reconnection and re-reads the registration each attempt.
         metadata = dict(result.metadata or {})
         capabilities = provider_config.opencode_capabilities(
             metadata.get("runtimeCapabilities")
         )
         metadata.update(
             {
-                "protocolVersion": "1.0",
+                "transport": "service-http",
                 "readOnly": not capabilities["startTurn"],
                 "storageMode": "opencode-native",
                 "sameSessionWriterLimit": 1,
@@ -190,7 +190,12 @@ class OpenCodeProvider(RuntimeProvider):
         config: RuntimeConfig,
         host: RuntimeHostClient,
     ) -> AgentRuntime:
-        return OpenCodeRuntime(config=config, host=host)
+        values = dict(config.values)
+        state_dir = values.get("stateDir")
+        service_reader = (
+            (lambda: read_service(state_dir)) if isinstance(state_dir, str) and state_dir else read_service
+        )
+        return OpenCodeServiceRuntime(config=config, host=host, service_reader=service_reader)
 
     def resource_claims(
         self,
@@ -199,9 +204,9 @@ class OpenCodeProvider(RuntimeProvider):
         registry = str(provider_config.registry_dir(dict(config.values)))
         return (
             RuntimeResourceClaim(
-                kind="opencode_bridge_registry",
+                kind="opencode_service_registration",
                 key=_instance_resource_key(dict(config.values)),
-                label=f"OpenCode bridge registry {registry!r}",
+                label=f"OpenCode service registration under {registry!r}",
             ),
         )
 
@@ -215,13 +220,11 @@ class OpenCodeProvider(RuntimeProvider):
 def _instance_resource_key(values: Mapping[str, Any]) -> str:
     """Registry key narrowed to one running OpenCode instance.
 
-    ``resource_claims``/``session_source_key`` used to collapse every OpenCode
-    process sharing a registry directory into a single identity, so two instances
-    on the same machine were indistinguishable to the host (audit M1). The config
-    schema already binds one runtime instance to a ``(servicePid, location)``
-    pair, so the canonical registry key is suffixed with whichever of those are
-    configured; with neither set the key is the plain registry key, unchanged. No
-    token or other secret ever enters the key.
+    ``resource_claims``/``session_source_key`` must not collapse every OpenCode
+    process sharing a state directory into one identity, so the key is suffixed
+    with whichever of ``(servicePid, location)`` are configured (audit M1). With
+    neither set the key is the plain registration directory, unchanged. No
+    password or other secret ever enters the key.
     """
 
     parts = [filesystem_resource_key(provider_config.registry_dir(dict(values)))]
@@ -230,5 +233,5 @@ def _instance_resource_key(values: Mapping[str, Any]) -> str:
         parts.append(f"servicePid={pid}")
     location = values.get("location")
     if isinstance(location, str) and location:
-        parts.append(f"location={discovery.normalize_location(location)}")
+        parts.append(f"location={canonical_path(location)}")
     return "::".join(parts)

@@ -84,6 +84,61 @@ READ_ONLY_ACTIONS = frozenset(
 
 DEFAULT_PAGE_SIZE = 100
 
+#: One source of truth for what this transport can do. Provider discovery and the
+#: attached runtime both read it, so the AA descriptor can never advertise a
+#: capability the runtime would then refuse (the two-predicates failure mode).
+CAPABILITY_ROWS: tuple[dict[str, Any], ...] = (
+    {"capabilityId": "session.list"},
+    {"capabilityId": "session.getSnapshot"},
+    {"capabilityId": "session.getState"},
+    {"capabilityId": "session.getNotices"},
+    {"capabilityId": "catalog.model"},
+    {"capabilityId": "catalog.agent"},
+    {"capabilityId": "session.send_message"},
+    {"capabilityId": "session.interrupt"},
+    {"capabilityId": "session.commands"},
+    {"capabilityId": "session.interaction.approval"},
+    {
+        "capabilityId": "catalog.permission",
+        "supported": False,
+        "available": False,
+        "reason": "the host exposes no permission catalog over HTTP",
+    },
+    {
+        "capabilityId": "session.steer",
+        "supported": False,
+        "available": False,
+        "reason": "the host exposes no steer endpoint",
+    },
+    {
+        "capabilityId": "runtime.attachment",
+        "supported": False,
+        "available": False,
+        "reason": "attachment upload is not implemented on this transport yet",
+    },
+)
+
+
+def capability_rows(directory: str | None) -> list[dict[str, Any]]:
+    """Wire-form capability rows, with discovery state derived from the location.
+
+    rev3 ruling 2: the discovery state rides this row's metadata and is never a
+    new boolean. The host service answers `GET /api/session` with a paginated
+    inventory, so with a location bound this really is `complete` -- reporting
+    that without a location would overstate what one instance can see.
+    """
+    rows = [dict(row) for row in CAPABILITY_ROWS]
+    rows.append(
+        {
+            "capabilityId": "session.discovery",
+            "supported": True,
+            "available": bool(directory),
+            "reason": None if directory else "no location configured for this instance",
+            "metadata": {"discoveryState": "complete" if directory else "partial"},
+        }
+    )
+    return rows
+
 
 def requires_local_confirmation(action: object) -> bool:
     if not isinstance(action, str):
@@ -241,52 +296,20 @@ class OpenCodeServiceRuntime(AgentRuntime):
 
     async def get_runtime_capabilities(self) -> RuntimeCapabilitySet:
         await self._ensure_client()
-        directory = self.directory
         rows = [
-            self._capability("session.list", supported=True, available=True),
-            self._capability("session.getSnapshot", supported=True, available=True),
-            self._capability("session.getState", supported=True, available=True),
-            self._capability("session.getNotices", supported=True, available=True),
-            self._capability("catalog.model", supported=True, available=True),
-            self._capability("catalog.agent", supported=True, available=True),
-            self._capability(
-                "catalog.permission",
-                supported=False,
-                available=False,
-                reason="the host exposes no permission catalog over HTTP",
-            ),
-            self._capability("session.send_message", supported=True, available=True),
-            self._capability("session.interrupt", supported=True, available=True),
-            self._capability("session.commands", supported=True, available=True),
-            self._capability("session.interaction.approval", supported=True, available=True),
-            self._capability(
-                "session.steer",
-                supported=False,
-                available=False,
-                reason="the host exposes no steer endpoint",
-            ),
-            self._capability(
-                "runtime.attachment",
-                supported=False,
-                available=False,
-                reason="attachment upload is not implemented on this transport yet",
-            ),
-            # rev3 ruling 2: discovery state rides this row's metadata. The host
-            # service answers `GET /api/session` with a paginated inventory, so
-            # unlike the in-process event stream this really can be complete --
-            # but only when a location is bound (otherwise we would over-report).
             RuntimeCapability(
-                capability_id="session.discovery",
+                capability_id=row["capabilityId"],
                 scope="runtime",
                 runtime=RUNTIME,
                 runtime_id=self._runtime_id,
                 connector_id=self.host.connector_id,
-                supported=True,
-                available=bool(directory),
-                allowed=True,
-                unavailable_reason=None if directory else "no location configured for this instance",
-                metadata={"discoveryState": "complete" if directory else "partial"},
-            ),
+                supported=bool(row.get("supported", True)),
+                available=bool(row.get("available", True)),
+                allowed=bool(row.get("supported", True)) and bool(row.get("available", True)),
+                unavailable_reason=row.get("reason"),
+                metadata=row.get("metadata", {}),
+            )
+            for row in capability_rows(self.directory)
         ]
         self._catalog_revision += 1
         return RuntimeCapabilitySet(
@@ -296,21 +319,6 @@ class OpenCodeServiceRuntime(AgentRuntime):
             connector_id=self.host.connector_id,
             runtime_id=self._runtime_id,
             metadata={"transport": "service-http", "serviceVersion": self._identity.runtime_version},
-        )
-
-    def _capability(
-        self, capability_id: str, *, supported: bool, available: bool, reason: str | None = None
-    ) -> RuntimeCapability:
-        return RuntimeCapability(
-            capability_id=capability_id,
-            scope="runtime",
-            runtime=RUNTIME,
-            runtime_id=self._runtime_id,
-            connector_id=self.host.connector_id,
-            supported=supported,
-            available=available,
-            allowed=supported and available,
-            unavailable_reason=reason,
         )
 
     # ---------------------------------------------------------------- catalogs
