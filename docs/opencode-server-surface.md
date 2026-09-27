@@ -63,6 +63,23 @@ Agents Anywhere 侧对端中转」这一形态决策的判据来源；插件侧�
   识别宿主自己派生的子会话没问题。
 - `GET /api/session/active` 给出当前活跃会话（实测 1 条）。
 
+### 4.1 消息与部件形状（活服务真实样本，时间线映射的依据）
+
+取自 `GET /api/session/ses_f22107110ffdwOAm3Bcv9JiTBV/message?limit=100`（100 条）：
+
+| 消息 `type` | 键 | 说明 |
+| --- | --- | --- |
+| `user` | `id, text, files, agents, metadata, time, type` | 用户回合 |
+| `assistant` | `id, agent, model, content[], snapshot, time, type` | 正文在 `content`（部件数组）；`snapshot` 是宿主自己的树快照 |
+| `synthetic` | `id, text, description, metadata, time, type` | 合成消息 |
+| `idle` | `id, outcome, time, type` | **回合终止记录**，`outcome ∈ {interrupted, …}` ⇒ 回合是否结束不必靠事件推断 |
+| `model-switched` | `id, model, previous, time, type` | 模型切换的显式消息 |
+
+部件 `type` 分布（同一样本）：`reasoning` 74、`text` 62、`tool` 66。
+
+⇒ 投影要点：一条消息 = 一个 `id`，正文按 `content[]` 顺序展开；`idle` 与 `model-switched`
+也是"条目"，不能当噪声丢掉（AA 侧要显示"这轮被打断/中途换过模型"）。
+
 ## 5. 目录面：宿主直接告诉你它装了什么
 
 | 面 | 实测 | 关键字段 |
