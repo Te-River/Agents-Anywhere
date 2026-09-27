@@ -10,6 +10,14 @@
 > [`evidence/20260926-213919/`](./evidence/20260926-213919/)，逐份出处与可信度分级见
 > [RECOVERY.md](./evidence/20260926-213919/RECOVERY.md)。旧路径不再存在，遇到请按此换算。
 
+> 形态决策（把 OpenCode 接入改为 Agents Anywhere 侧对端中转）的实测判据集中在
+> [`docs/opencode-server-surface.md`](../docs/opencode-server-surface.md)：
+> 服务发现（`service.json` + `GET /api/info` + Basic）、location 用 `?directory=` 而非请求头、
+> 会话与子会话可全量枚举（本目录 83 条 / 76 条带 `parentID`）、目录面（91 个插件含 `failed` 态、
+> 79 个模型含跨 provider 重复 `id`、16 个 skill、13 个 agent 含 7 个 subagent）、事件词表
+> （`session.execution.*` / `session.child.*` / `mcp.status.changed`），以及 4 条未证项。
+> 本文继续作为**插件形态**的验证台账。
+
 ## 一、自动化检查（本地已执行）
 
 | 范围 | 命令 | 结果 | 备注 |
