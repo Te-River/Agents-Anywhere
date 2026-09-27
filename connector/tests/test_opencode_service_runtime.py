@@ -72,12 +72,40 @@ class Recorder:
         self.health: list[tuple[str, Any]] = []
         self.requests: list[tuple[str, str, Any]] = []
         self.query: list[tuple[str, str, tuple[tuple[str, str], ...]]] = []
+        self.published: list[tuple[str, dict[str, Any]]] = []
 
     async def runtime_health_update(self, status: str, detail: Any = None) -> None:
         self.health.append((status, detail))
 
     async def runtime_capabilities_update(self, *args: Any, **kwargs: Any) -> None:
         return None
+
+    async def session_state_update(self, **kwargs: Any) -> None:
+        self.published.append(("state", kwargs))
+
+    async def session_turn_ended(self, **kwargs: Any) -> None:
+        self.published.append(("turnEnded", kwargs))
+
+    async def timeline_sync(self, **kwargs: Any) -> None:
+        self.published.append(("timeline", kwargs))
+
+    async def notice_upsert(self, notice: Any) -> None:
+        self.published.append(("notice", {"notice_id": notice.notice_id, "actions": [a["actionId"] for a in notice.actions]}))
+
+    async def session_meta_upsert(self, **kwargs: Any) -> None:
+        self.published.append(("meta", kwargs))
+
+    async def model_catalog_update(self, catalog: Any) -> None:
+        self.published.append(("modelCatalog", {"count": len(catalog.models)}))
+
+    async def agent_catalog_update(self, catalog: Any) -> None:
+        self.published.append(("agentCatalog", {"count": len(catalog.agents)}))
+
+
+HOST_METHODS = (
+    "runtime_health_update", "runtime_capabilities_update", "session_state_update", "session_turn_ended",
+    "timeline_sync", "notice_upsert", "session_meta_upsert", "model_catalog_update", "agent_catalog_update",
+)
 
 
 def build(routes: dict[tuple[str, str], Any], values: dict[str, Any] | None = None) -> tuple[OpenCodeServiceRuntime, Recorder]:
@@ -93,7 +121,7 @@ def build(routes: dict[tuple[str, str], Any], values: dict[str, Any] | None = No
 
     runtime = OpenCodeServiceRuntime(
         RuntimeConfig(RUNTIME_NAME, 1, values={"location": DIRECTORY, **(values or {})}),
-        SimpleNamespace(connector_id="conn_test", session_namespace="ns_test", **{k: getattr(host, k) for k in ("runtime_health_update", "runtime_capabilities_update")}),
+        SimpleNamespace(connector_id="conn_test", session_namespace="ns_test", **{k: getattr(host, k) for k in HOST_METHODS}),
         service_reader=lambda: SERVICE,
         client_factory=lambda service: OpenCodeServerClient(service, transport=httpx.MockTransport(handler)),
     )
@@ -110,6 +138,11 @@ BASE_ROUTES: dict[tuple[str, str], Any] = {
     ("GET", f"/api/session/{EXTERNAL}/message"): MESSAGES,
     ("GET", f"/api/session/{EXTERNAL}"): httpx.Response(200, json={"data": {"id": EXTERNAL}}),
     ("GET", "/api/session/ses_child/message"): MESSAGES,
+    # The pump starts with the runtime; give it a stream that simply ends so a
+    # test that never calls stop() does not sit reconnecting.
+    ("GET", "/api/event"): httpx.Response(
+        200, headers={"content-type": "text/event-stream"}, text=": heartbeat\n\n"
+    ),
 }
 
 
@@ -631,3 +664,138 @@ def test_capabilities_report_the_attached_service_version() -> None:
     assert caps.metadata["serviceVersion"] == "2.0.18"
     steer = next(row for row in caps.capabilities if row.capability_id == "session.steer")
     assert steer.supported is False
+
+
+# ------------------------------------------------------------------ event pump
+
+
+def frame(event_type: str, *, directory: str = DIRECTORY, seq: int | None = None, data: dict | None = None) -> dict:
+    payload: dict[str, Any] = {"id": f"evt_{event_type}", "type": event_type, "data": data or {"sessionID": EXTERNAL}}
+    if directory is not None:
+        payload["location"] = {"directory": directory}
+    if seq is not None:
+        payload["durable"] = {"aggregateID": EXTERNAL, "seq": seq, "version": 1}
+    return payload
+
+
+async def feed(runtime: OpenCodeServiceRuntime, *frames: dict) -> None:
+    for item in frames:
+        await runtime._handle_frame(item)
+
+
+def published(host: Recorder, kind: str) -> list[dict[str, Any]]:
+    return [payload for name, payload in host.published if name == kind]
+
+
+def test_a_finished_turn_publishes_state_a_turn_end_and_the_timeline() -> None:
+    runtime, host = build(dict(BASE_ROUTES))
+
+    async def scenario() -> None:
+        await runtime.start()
+        await feed(runtime, frame("session.execution.succeeded", data={"sessionID": EXTERNAL, "outcome": "succeeded"}))
+        await runtime.stop()
+
+    run(scenario())
+    assert published(host, "state")[-1]["status"] == "idle"
+    assert published(host, "turnEnded")[-1]["outcome"] == "completed"
+    assert published(host, "timeline"), "the session must be re-read when its turn ends"
+
+
+def test_a_frame_from_another_location_publishes_nothing() -> None:
+    runtime, host = build(dict(BASE_ROUTES))
+
+    async def scenario() -> None:
+        await runtime.start()
+        await feed(runtime, frame("session.execution.succeeded", directory="/other/place"))
+        await runtime.stop()
+
+    run(scenario())
+    assert host.published == []
+    assert runtime._event_actions["skipped:session.execution.succeeded"] == 1
+
+
+def test_streaming_frames_are_coalesced_into_one_re_read(monkeypatch) -> None:
+    from connector.runtimes.opencode.serve import runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "EVENT_REFRESH_SECONDS", 0.05)
+    runtime, host = build(dict(BASE_ROUTES))
+
+    async def scenario() -> None:
+        await runtime.start()
+        await feed(runtime, *(frame("message.part.delta") for _ in range(6)))
+        await asyncio.sleep(0.3)
+        await runtime.stop()
+
+    run(scenario())
+    assert len(published(host, "timeline")) == 1, "one turn emits dozens of deltas"
+
+
+def test_a_sequence_gap_forces_a_re_read_even_for_an_unrouted_event(monkeypatch) -> None:
+    from connector.runtimes.opencode.serve import runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "EVENT_REFRESH_SECONDS", 0.05)
+    runtime, host = build(dict(BASE_ROUTES))
+
+    async def scenario() -> None:
+        await runtime.start()
+        # An event type this build does not route would be dropped; a gap in the
+        # per-session sequence says we missed frames and cannot ask for them, so
+        # the session is re-read instead.
+        await feed(runtime, frame("session.something.invented", seq=3))
+        assert published(host, "timeline") == []
+        await feed(runtime, frame("session.something.invented", seq=9))
+        await asyncio.sleep(0.3)
+        await runtime.stop()
+
+    run(scenario())
+    assert len(published(host, "timeline")) == 1, "the stream cannot resume, so a gap must re-read"
+
+
+def test_an_asked_permission_becomes_a_notice_the_user_can_answer() -> None:
+    routes = _permission_routes([{"id": "per_9", "action": "read", "resources": ["/work/repo/src/a.ts"]}])
+    runtime, host = build(routes)
+
+    async def scenario() -> None:
+        await runtime.start()
+        await feed(runtime, frame("permission.asked"))
+        await runtime.stop()
+
+    run(scenario())
+    assert published(host, "state")[-1]["status"] == "waiting_approval"
+    notices = published(host, "notice")
+    assert notices and notices[0]["notice_id"] == "per_9"
+    assert notices[0]["actions"] == ["allow_once", "deny"]
+
+
+def test_a_catalog_event_republishes_both_catalogs() -> None:
+    routes = dict(BASE_ROUTES)
+    routes[("GET", "/api/model")] = [{"id": "m", "providerID": "p", "name": "M"}]
+    routes[("GET", "/api/agent")] = [{"id": "build", "name": "build", "mode": "primary"}]
+    runtime, host = build(routes)
+
+    async def scenario() -> None:
+        await runtime.start()
+        await feed(runtime, frame("model.updated", directory=None))
+        await runtime.stop()
+
+    run(scenario())
+    assert published(host, "modelCatalog") == [{"count": 1}]
+    assert published(host, "agentCatalog") == [{"count": 1}]
+
+
+def test_a_session_row_event_only_updates_the_row_for_this_location() -> None:
+    routes = dict(BASE_ROUTES)
+    routes[("GET", f"/api/session/{EXTERNAL}")] = httpx.Response(
+        200, json={"data": {"id": EXTERNAL, "title": "改名了", "location": {"directory": DIRECTORY}, "time": {"updated": 99}}}
+    )
+    runtime, host = build(routes)
+
+    async def scenario() -> None:
+        await runtime.start()
+        await feed(runtime, frame("session.model.selected", data={"sessionID": EXTERNAL, "model": {"id": "space-bunny-free", "providerID": "opencode-go"}}))
+        await runtime.stop()
+
+    run(scenario())
+    metas = published(host, "meta")
+    assert metas and metas[0]["title"] == "改名了"
+    assert metas[0]["external_session_id"] == EXTERNAL

@@ -224,9 +224,12 @@ class OpenCodeServerClient:
     async def stream_events(self) -> AsyncIterator[dict[str, Any]]:
         """Yield decoded `data:` frames from `GET /api/event` (SSE).
 
-        Frames carry `{id, event, data}`; the id is informational only -- the
-        endpoint takes no parameters, so a dropped connection cannot resume and
-        callers must rebuild from the list endpoints instead.
+        A frame is `{id, type, data}` plus optional `created`, `location`
+        (`{"directory": …}`) and `durable` (`{aggregateID, seq, version}`) -- the
+        discriminator is `type`, not `event`. The endpoint takes no parameters and
+        ignores `Last-Event-ID` (measured on a reconnect), so a dropped
+        connection cannot resume: callers must re-read the list endpoints, which
+        is what the runtime's durable-sequence tracking is for.
         """
         async with self._http.stream("GET", "/api/event", headers={"accept": "text/event-stream"}) as response:
             if response.status_code >= 400:

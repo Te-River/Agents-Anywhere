@@ -22,6 +22,7 @@ denylist would silently make an unrecognised (or empty) action remote-answerable
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
@@ -50,7 +51,7 @@ from connector.runtime_protocol import (
 )
 from connector.runtime_protocol.filesystem import canonical_path
 from connector.runtime_protocol.host import RuntimeHostClient
-from connector.runtimes.opencode.serve import mappers
+from connector.runtimes.opencode.serve import events, mappers
 from connector.runtimes.opencode.serve.client import (
     OpenCodeServerClient,
     OpenCodeServiceError,
@@ -85,6 +86,12 @@ READ_ONLY_ACTIONS = frozenset(
 )
 
 DEFAULT_PAGE_SIZE = 100
+
+#: How long the pump waits for quiet before re-reading a session's timeline. One
+#: turn emits dozens of `message.part.delta` frames, and a re-read is a full
+#: stored-message fetch (measured: 649 messages -> 1418 items), so the window is
+#: about cost, not taste. Terminal frames bypass it.
+EVENT_REFRESH_SECONDS = 2.0
 
 
 class OpenCodeLocationNotLoaded(OpenCodeServiceUnavailable):
@@ -217,6 +224,12 @@ class OpenCodeServiceRuntime(AgentRuntime):
         # The host's own spelling of `location`, resolved at attach time; every
         # location-scoped query uses it because the host compares strings.
         self._resolved_directory: str | None = None
+        # Event pump state: the per-session durable sequence (to notice that we
+        # missed frames) and the debounced re-read tasks.
+        self._event_task: asyncio.Task[None] | None = None
+        self._durable_seq: dict[str, int] = {}
+        self._pending_refreshes: dict[str, asyncio.Task[None]] = {}
+        self._event_actions: Counter[str] = Counter()
 
     # ------------------------------------------------------------------ identity
 
@@ -275,6 +288,7 @@ class OpenCodeServiceRuntime(AgentRuntime):
             return
         with suppress(Exception):
             await self.host.runtime_health_update("running")
+        self._start_events()
 
     async def _attach(self) -> dict[str, Any]:
         service = self._service_reader()
@@ -347,12 +361,179 @@ class OpenCodeServiceRuntime(AgentRuntime):
                     continue
                 with suppress(Exception):
                     await self.host.runtime_health_update("running")
+                self._start_events()
                 return
 
         self._restart_task = asyncio.create_task(loop())
 
+    # -------------------------------------------------------------- event pump
+
+    def _start_events(self) -> None:
+        if self._stopping or (self._event_task is not None and not self._event_task.done()):
+            return
+        self._event_task = asyncio.create_task(self._event_loop())
+
+    async def _event_loop(self) -> None:
+        """Follow `GET /api/event` and turn frames into re-reads.
+
+        The stream cannot be resumed (`Last-Event-ID` is ignored), so this loop
+        only lowers latency: the Connector's polling scanner stays the backstop,
+        because a frame can be missed and a dropped connection cannot be
+        replayed.
+        """
+        backoff = 1.0
+        while not self._stopping:
+            try:
+                client = await self._ensure_client()
+                async for frame in client.stream_events():
+                    backoff = 1.0
+                    await self._handle_frame(frame)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - a dropped stream is expected
+                self._event_actions["stream:error"] += 1
+                logger.warning("OpenCode event stream interrupted", {"error": type(error).__name__})
+            if self._stopping:
+                return
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
+
+    async def _handle_frame(self, frame: Mapping[str, Any]) -> None:
+        event_type = events.frame_type(frame)
+        location = events.frame_location(frame)
+        target = self._resolved_directory or self.directory
+        if location is not None and target is not None and canonical_path(location) != canonical_path(target):
+            self._event_actions[f"skipped:{event_type}"] += 1
+            return
+        external = events.frame_session_id(frame)
+        sequence = events.durable_sequence(frame)
+        resync = False
+        if sequence is not None:
+            aggregate, seq = sequence
+            previous = self._durable_seq.get(aggregate)
+            resync = events.needs_resync(previous, seq)
+            self._durable_seq[aggregate] = max(previous or -1, seq)
+        actions = set(events.actions_for(event_type))
+        if resync:
+            # We missed frames and cannot ask for them again: rebuild from source.
+            actions.add(events.REFRESH_TIMELINE)
+        if not actions:
+            self._event_actions[f"ignored:{event_type or 'anonymous'}"] += 1
+            return
+        self._event_actions[event_type] += 1
+        if not external and events.REFRESH_CATALOGS not in actions:
+            return
+        if events.REFRESH_CATALOGS in actions:
+            await self._publish_catalogs()
+        if events.STATE_RUNNING in actions:
+            await self._publish_state(external, "running")
+        elif events.STATE_WAITING in actions:
+            await self._publish_state(external, "waiting_approval")
+        elif events.STATE_ERROR in actions:
+            await self._publish_state(external, "error")
+        elif events.STATE_IDLE in actions:
+            await self._publish_state(external, "idle", outcome=(frame.get("data") or {}).get("outcome"))
+        if events.REFRESH_NOTICES in actions:
+            await self._publish_notices(external)
+        if events.REFRESH_SESSION in actions:
+            await self._publish_session_row(external)
+        if events.REFRESH_TIMELINE in actions:
+            if events.STATE_IDLE in actions:
+                await self._publish_timeline(external)
+            else:
+                self._debounce(f"timeline:{external}", self._publish_timeline, external)
+
+    def _debounce(self, key: str, work, *args: Any) -> None:
+        """Coalesce the dozens of frames one turn emits into one re-read."""
+        previous = self._pending_refreshes.get(key)
+        if previous is not None:
+            previous.cancel()
+
+        async def later() -> None:
+            try:
+                await asyncio.sleep(EVENT_REFRESH_SECONDS)
+                await work(*args)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - a failed re-read is reported, not fatal
+                logger.warning("OpenCode event refresh failed", {"key": key, "error": type(error).__name__})
+
+        task = asyncio.create_task(later())
+        self._pending_refreshes[key] = task
+        task.add_done_callback(lambda _done: self._pending_refreshes.pop(key, None))
+
+    def _platform_id(self, external: str) -> str:
+        platform_id = mappers.platform_session_id(self.host.session_namespace, external)
+        self._external_by_session[platform_id] = external
+        return platform_id
+
+    async def _publish_state(self, external: str, status: str, outcome: Any = None) -> None:
+        session_id = self._platform_id(external)
+        with suppress(Exception):
+            await self.host.session_state_update(
+                session_id=session_id,
+                runtime=RUNTIME,
+                status=status,  # type: ignore[arg-type]
+                external_session_id=external,
+                metadata={"outcome": outcome} if isinstance(outcome, str) and outcome else {},
+            )
+        if status == "idle" and isinstance(outcome, str) and outcome:
+            with suppress(Exception):
+                await self.host.session_turn_ended(
+                    session_id=session_id,
+                    runtime=RUNTIME,
+                    external_session_id=external,
+                    outcome={"succeeded": "completed", "failed": "failed", "interrupted": "cancelled"}.get(outcome, "completed"),
+                )
+
+    async def _publish_timeline(self, external: str) -> None:
+        session_id = self._platform_id(external)
+        snapshot = await self._snapshot(external)
+        await self.host.timeline_sync(
+            session_id=session_id,
+            runtime=RUNTIME,
+            items=snapshot.items,
+            external_session_id=external,
+            complete=snapshot.complete,
+            metadata=snapshot.metadata,
+        )
+
+    async def _publish_notices(self, external: str) -> None:
+        session_id = self._platform_id(external)
+        for notice in await self.get_session_notices(session_id, external):
+            await self.host.notice_upsert(notice)
+
+    async def _publish_session_row(self, external: str) -> None:
+        client = await self._ensure_client()
+        row = await client.get(f"/api/session/{external}")
+        if not isinstance(row, Mapping) or not self._belongs_to_location(row):
+            return
+        meta = mappers.session_meta(row, namespace=self.host.session_namespace)
+        await self.host.session_meta_upsert(
+            session_id=meta.session_id,
+            runtime=RUNTIME,
+            external_session_id=meta.external_session_id,
+            title=meta.title,
+            cwd=meta.cwd,
+            ordering_time=meta.ordering_time,
+            metadata=meta.metadata,
+        )
+
+    async def _publish_catalogs(self) -> None:
+        await self.host.model_catalog_update(await self.list_model_catalog(limit=500))
+        await self.host.agent_catalog_update(await self.list_agent_catalog())
+
     async def stop(self) -> None:
         self._stopping = True
+        if self._event_task is not None:
+            self._event_task.cancel()
+            await asyncio.gather(self._event_task, return_exceptions=True)
+            self._event_task = None
+        refreshes = list(self._pending_refreshes.values())
+        self._pending_refreshes.clear()
+        for task in refreshes:
+            task.cancel()
+        await asyncio.gather(*refreshes, return_exceptions=True)
         if self._restart_task is not None:
             self._restart_task.cancel()
             await asyncio.gather(self._restart_task, return_exceptions=True)

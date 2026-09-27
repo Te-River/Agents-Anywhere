@@ -156,6 +156,34 @@ synthetic / system / skill / shell / assistant / compaction / idle`（`idle` 不
 ⇒ 插件时代两条"永久限制"在这里消失：**回合状态不必自造判据**（`session.execution.*`），
 **会话发现不必恒 partial**（`GET /api/session` 是可分页全量清单 + `cursor`）。
 
+### 6.1 帧的真实形状（活实例实测，2026-09-27）
+
+判别字段是 **`type`，不是 `event`**；`created`/`location`/`durable` 都是可选的：
+
+```json
+{"id":"evt_0e2a29453001tG0ei83I7sZZOE","created":1790508700755,"type":"session.created",
+ "location":{"directory":"D:\\aa-recovery\\scratch-project"},
+ "data":{"sessionID":"ses_…","slug":"kind-forest","version":"2.0.18","projectID":"8e2d…",
+         "location":{"directory":"D:\\…"},"subpath":"","title":"aa-events-probe"},
+ "durable":{"aggregateID":"ses_…","seq":0,"version":1}}
+```
+
+用"建会话→换模型→删会话"当唯一激励（不跑回合）实测到的帧：
+
+| 帧 | 观察 |
+| --- | --- |
+| `server.connected` | 连接即一帧，`data={}`，无 `location`/`durable` |
+| `session.created` | 带 `location` 与 `durable.seq=0` |
+| `project.updated` | **无 `location`**（整机语义），不能按位置归属 |
+| `session.model.selected` | `data={sessionID, model{id,providerID}}`，`durable.seq=1` ⇒ 换模型的真实事件名不是 §6 猜的 `model.updated` |
+| `session.deleted` | DELETE 之后**确实出现**，但要等一会儿：立刻断流的探针看不到 ⇒ 事件只能降延迟，不能当权威 |
+| `interrupt`（空闲会话） | 无帧 |
+
+- `Last-Event-ID` 被忽略：带旧 id 重连只拿到一个**新的** `server.connected`（不同 id）⇒ **断线不可续传**，
+  所以 §8 裁定 3 的"前缀校准"在对端形态下仍然需要，落地方式就是 `durable.seq` 出现缺口时整段重读。
+- 空闲 10s 只有一帧 `server.connected` ⇒ 心跳是 SSE 注释行（`: heartbeat`），不是事件帧。
+- 一次 30s 读超时后泵会自行重连并继续收帧（实测 `stream:error` 计 1 次后仍收到后续事件）。
+
 ## 7. 写面（形状取自实例自报规格；除 prompt/command 的字段名外未实际触发）
 
 | 端点 | 请求体（`req=` 为必填键） | 备注 |
@@ -197,7 +225,7 @@ synthetic / system / skill / shell / assistant / compaction / idle`（`idle` 不
 | --- | --- | --- | --- |
 | 1 `location` 必填、Hub fail-closed | 连接 `initialize` 声明一次，Hub 按目录过滤 | attach 时用 `/api/debug/location` 把配置位置解析成宿主自己的拼写（解析不到 ⇒ `location_not_loaded`），查询带 `?directory=`，再校验回包 `location.directory` | 保持（防线从"连接身份"改为"解析 + 查询参数 + 回包校验"；大小写敏感见 §3） |
 | 2 `session.discovery` 的 `metadata.discoveryState` | 只有事件流 ⇒ 恒 `partial` | 有全量清单 ⇒ 可 `complete` | 保持且更强（禁止伪造仍是硬规） |
-| 3 `historyHash` 前缀校准 | 自研 | 仍需要（SSE 断线重连后的续推判据，见 §9） | 待定 |
+| 3 `historyHash` 前缀校准 | 自研 | 用帧上的 `durable.{aggregateID,seq}` 检缺口：`needs_resync` 判定重复/跳号即整段重读该会话（SSE 不可续传，见 §6.1） | 保持（换了判据来源，语义仍是"前缀不可信就重读"） |
 | 4 跳过计数器归属（Hub `skippedEventCount` / Connector `skippedItemCount`） | 两侧各自计数 | 快照元数据 `skippedMessageTypes`（实测某会话 `idle_without_turn: 62`）；事件面尚未接 | 快照面保持，事件面待定 |
 
 ## 9. 未证清单（动手前必须先测，别当已知）
@@ -207,8 +235,9 @@ synthetic / system / skill / shell / assistant / compaction / idle`（`idle` 不
    是否进 `/api/event`。
 2. **`permission/{requestID}/reply` 真发一次**：只证路由存在、`/api/permission/request` 返回 200 空集。
    需要一次真实待审批（跑一个会要权限的回合），并确认 `always` 是否会被宿主落盘。
-3. **SSE 断线续传**：每帧带 `id`，但未证断线后能否按 `id` 续传（还是只能重订阅 + 靠清单重建）。
-   这决定 §8 裁定 3 的 `historyHash` 是否仍需要。
+3. ~~**SSE 断线续传**~~ **已证（2026-09-27）**：带 `Last-Event-ID` 重连只拿到新的
+   `server.connected`，旧帧不重放 ⇒ **不可续传**。§8 裁定 3 的落地方式因此确定：用
+   `durable.{aggregateID,seq}` 检缺口，缺了就整段重读该会话（`serve/events.py:needs_resync`）。
 4. ~~**`?directory=` 的确切语义**~~ **已证（2026-09-27）**：分隔符 `/` 与 `\` 等价、大小写**敏感**、
    非前缀匹配（子目录算未知）、完全未知的路径是 HTTP 500 而不是空集；对 model/agent/command/config
    四张面**完全无效**。结论与处置见 §3、§5。
