@@ -45,11 +45,20 @@ Agents Anywhere 侧对端中转」这一形态决策的判据来源；插件侧�
 | `GET /api/session`（带 `x-opencode-directory: D:/Github/Agents-Anywhere`） | 50 条，混 4 个目录 |
 | `GET /api/session`（不带该头） | 同样 50 条、4 个目录 ⇒ **该头对列表无过滤作用** |
 | `GET /api/session?directory=<绝对路径>` | 只剩该目录的会话（分页取完共 83 条） |
-| `GET /api/debug/location` | `[{"directory":…}, …]` 列出实例已加载的 3 个目录 |
+| `GET /api/session?directory=D:/Github/Agents-Anywhere` | 83 条 ⇒ 分隔符 `/` 与 `\` 等价 |
+| `GET /api/session?directory=d:/github/agents-anywhere` | **0 条** ⇒ **大小写敏感**：用户手输的小写路径看着像"这个项目没有会话" |
+| `GET /api/session?directory=D:\Github\Agents-Anywhere\connector` | 0 条 ⇒ 不是前缀/子树匹配，只认精确目录 |
+| `GET /api/session?directory=nope` | **HTTP 500**（空体）⇒ 完全未知的路径不是空集合，是服务端错误 |
+| `GET /api/debug/location` | `{"data":[{"directory":…}, …]}`，实测列出实例已加载的 2 个目录 |
 | `GET /api/mcp` | 回包 `location.directory` 是 `C:\Users\34296`，**不是**请求头里给的值 |
 
 ⇒ 集成文档里"按 location 隔离"必须实现为：**用 `?directory=` 查询 + 校验回包每条的
 `location.directory`**，不能照抄插件时代"连接声明一次、服务端过滤"的做法。
+
+⇒ 因为过滤是**大小写敏感的字符串比较**，连接器在 attach 时先用 `/api/debug/location` 把配置里的
+位置解析成**宿主自己的拼写**（`serve/runtime.py:_resolve_directory`），解析不到就报
+`location_not_loaded` 而不是返回空清单；catalogs 面（下一节）不吃这个参数，所以"目录空了"只可能
+出现在会话面。
 
 ## 4. 会话与子会话（"子 Agent 能不能显示"）
 
@@ -65,20 +74,44 @@ Agents Anywhere 侧对端中转」这一形态决策的判据来源；插件侧�
 
 ### 4.1 消息与部件形状（活服务真实样本，时间线映射的依据）
 
-取自 `GET /api/session/ses_f22107110ffdwOAm3Bcv9JiTBV/message?limit=100`（100 条）：
+分页与顺序（全部实测，`GET /api/session/{id}/message`）：
+
+| 调用 | 结果 |
+| --- | --- |
+| 不带参数 | **默认按时间倒序**（最新在前），默认页 50 条 |
+| `?order=asc` | 正序，第一页即会话第一条消息 |
+| `?limit=200` | 接受；`?limit=500` → **HTTP 400** `Expected a value less than or equal to 200` |
+| `?cursor=<next>&order=asc` | **HTTP 400** `InvalidCursorError: Cursor cannot be combined with order` ⇒ 游标自带 order，后续页只传 cursor |
+| 走完 `cursor.next` | 主会话 33 页 / **649 条**，逐页时间戳单调递增，`id` 无重复；末游标仍指向一个**空页** ⇒ 见到空 `data` 必须停 |
+
+`Session.Message.Info` 全枚举：`agent-switched / model-switched / location-switched / user /
+synthetic / system / skill / shell / assistant / compaction / idle`（`idle` 不在 `?type=` 过滤枚举里，但确实出现在响应中）。
+
+取自该 649 条真实历史（`ses_f22107110ffdwOAm3Bcv9JiTBV`）：
 
 | 消息 `type` | 键 | 说明 |
 | --- | --- | --- |
-| `user` | `id, text, files, agents, metadata, time, type` | 用户回合 |
-| `assistant` | `id, agent, model, content[], snapshot, time, type` | 正文在 `content`（部件数组）；`snapshot` 是宿主自己的树快照 |
-| `synthetic` | `id, text, description, metadata, time, type` | 合成消息 |
-| `idle` | `id, outcome, time, type` | **回合终止记录**，`outcome ∈ {interrupted, …}` ⇒ 回合是否结束不必靠事件推断 |
-| `model-switched` | `id, model, previous, time, type` | 模型切换的显式消息 |
+| `user` | `id, text, files, agents, metadata, time, type` | 用户回合；`metadata.displayText/agent/model` 也在 |
+| `assistant` | `id, agent, model, content[], snapshot, finish, cost, tokens, time, type` | 正文在 `content`（部件数组）；`finish ∈ stop/length/tool-calls/content-filter/error/unknown`；失败时另有 `error{type,message}` 且 `content` 为空（实测 8/418 条） |
+| `synthetic` | `id, text, description, metadata, time, type` | **子 Agent 的落点**：`metadata.source="subagent"`、`childID`、`agent`、`state`；正文是 `<subagent sessionID=… state=… description=…/>` |
+| `idle` | `id, outcome, time, type` | 终止记录，`outcome ∈ succeeded/failed/interrupted`（实测 93/2/6） |
+| `model-switched` | `id, model{ID,id,variant}, previous{…}, time, type` | 模型切换（实测 4 条） |
+| `compaction` | `id, status, reason, model, summary, time, type` | 压缩点（实测 1 条），`summary` 是压缩后的正文 |
 
-部件 `type` 分布（同一样本）：`reasoning` 74、`text` 62、`tool` 66。
+部件 `type` 分布（同一样本）：`reasoning` 409、`text` 386、`tool` 404；工具 `state.status`：`completed` 402、`error` 2。
+工具部件 `state` 是四选一：`completed{status,input,content[],metadata}`、`error{status,input,error,content?,metadata?}`、
+`running{status,input,metadata}`、`streaming{status,input:字符串}`。**结果在 `state.content`（`Tool.Content[]` = `{type:"text",text}` 或 `{type:"file",uri,mime,name}`），
+`state` 里根本没有 `output`/`result` 键**——只读后者会让每一条工具行都只剩标题。
 
-⇒ 投影要点：一条消息 = 一个 `id`，正文按 `content[]` 顺序展开；`idle` 与 `model-switched`
-也是"条目"，不能当噪声丢掉（AA 侧要显示"这轮被打断/中途换过模型"）。
+⇒ 投影要点（对应 `connector/runtimes/opencode/serve/timeline.py`）：
+1. 会话按 `order=asc` 取全后再投影；`limit` 语义（"最新 N 条"）用 `order=desc` 取一页再倒回来。
+2. `idle` 与 `model-switched`/`compaction` 也是"条目"，不能当噪声丢掉（AA 侧要显示"这轮被打断/中途换过模型/压缩过"）。
+3. **一条 `user` 不等于一条 `idle`**：实测 46 条 `user` 对应 101 条 `idle`（一个回合内多次 idle），
+   且有 7 个回合根本没有 `idle`。所以 `turn.end` 只在"有开着的回合"时发出，多余的 `idle` 计入
+   `skippedMessageTypes.idle_without_turn`（实测 62），不伪造收尾。
+4. 工具条目的 `native_key` 用 `tool:<消息id>:<序号>` 而非宿主 `state.id`：`chatcmpl-tool-*` 在不同消息间会重复，
+   而 AA 服务端对时间线里**任一重复 item id 整体拒收**。
+5. 全历史投影一条会话 = **1418 条 item**（`message` 920 / `tool` 404 / `turn.*` 85 / 其他 9）⇒ 快照体积是真实约束，见 §9。
 
 ## 5. 目录面：宿主直接告诉你它装了什么
 
@@ -96,6 +129,10 @@ Agents Anywhere 侧对端中转」这一形态决策的判据来源；插件侧�
 `status:"failed", error:"Plugin must export a default …"` 且 `outdated:true`）。
 ⇒ 模型目录的正确组键是 **`providerID/modelID`**（两条都保留、都可选）；宿主内 `ctx.model`
 那条路上我们只能塌成一条，这是形态差异带来的实质改善。
+⇒ **`?directory=` 对 `/api/model`、`/api/agent`、`/api/command`、`/api/config` 一律无效**：
+79 / 13 / 11 / 3 条在正斜杠、反斜杠、小写、`nope`、不带参数五种调用下完全相同。也就是说这三张
+目录是**整机**的，不是本位置的；带参数只是表达意图，不能拿"目录空了"当 location 写错的信号
+（会空着的只有会话面，见 §3）。
 
 ## 6. 事件面
 
@@ -144,8 +181,14 @@ Agents Anywhere 侧对端中转」这一形态决策的判据来源；插件侧�
    需要一次真实待审批（跑一个会要权限的回合），并确认 `always` 是否会被宿主落盘。
 3. **SSE 断线续传**：每帧带 `id`，但未证断线后能否按 `id` 续传（还是只能重订阅 + 靠清单重建）。
    这决定 §8 裁定 3 的 `historyHash` 是否仍需要。
-4. **`?directory=` 的确切语义**：过滤后仍是 50 条/页（该目录会话数 ≥50），未证它是否同时接受
-   相对路径、大小写差异、以及 `projectID` 与 `directory` 的优先级。
+4. ~~**`?directory=` 的确切语义**~~ **已证（2026-09-27）**：分隔符 `/` 与 `\` 等价、大小写**敏感**、
+   非前缀匹配（子目录算未知）、完全未知的路径是 HTTP 500 而不是空集；对 model/agent/command/config
+   四张面**完全无效**。结论与处置见 §3、§5。
+5. **快照体积**：一条 649 消息的真实会话投影出 **1418 条 item**。Hub 侧一次 `publish` 能吃多少、
+   超出后是分页还是截断，未证；AA 的 `get_session_snapshot(limit=…)` 目前映射到"最新 N 条**消息**"
+   （不是 N 条 item）。
+6. **`?type=` 过滤**：枚举里没有 `idle`，但 `idle` 确实在响应里 ⇒ 用 `type` 过滤会不会把生命周期
+   消息漏掉，未证（当前实现不使用该参数）。
 
 ## 10. 复现命令
 
