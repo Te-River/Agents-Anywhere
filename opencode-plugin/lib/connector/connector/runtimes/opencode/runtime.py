@@ -506,6 +506,12 @@ class OpenCodeRuntime(AgentRuntime):
                 )
                 self._sync = SyncRelay(client, self.host, runtime_id=self._runtime_id)
                 self._sync.start()
+                # OpenCode 的会话发现是 partial（持续事件流，没有全量 inventory，
+                # 因此永远不会收到 DSH 那样的 session.inventory.complete）。桥已
+                # 连接、目录已推送、事件中继已启动即运行中；不报 running 会让
+                # 服务端 available 永远停在 starting。
+                with suppress(Exception):
+                    await self.host.runtime_health_update("running")
             else:
                 with suppress(Exception):
                     await self.host.runtime_health_update("running")

@@ -2730,9 +2730,16 @@ var BridgeHub = class {
 		const items = await collectCatalogItems(this.#agentApi);
 		if (items === null) throw new RpcFault(RPC_ERROR_CODES.methodNotFound, RPC_ERROR_DATA.unsupportedOperation, "the host exposes no agent catalog (ctx.agent.list/transform)");
 		const agents = [];
+		const seenAgentIds = /* @__PURE__ */ new Set();
+		const duplicateAgentIds = [];
 		for (const raw of items) {
 			const agentId = firstString(raw["id"]);
 			if (agentId === null) continue;
+			if (seenAgentIds.has(agentId)) {
+				duplicateAgentIds.push(agentId);
+				continue;
+			}
+			seenAgentIds.add(agentId);
 			const name = firstString(raw["name"]);
 			const description = firstString(raw["description"]);
 			agents.push({
@@ -2743,6 +2750,7 @@ var BridgeHub = class {
 				hidden: raw["hidden"] === true
 			});
 		}
+		if (duplicateAgentIds.length > 0) this.#logger.warn("agent catalog repeats an id; kept the first entry per id", { duplicates: [...new Set(duplicateAgentIds)] });
 		return { agents };
 	}
 	/**
@@ -2750,11 +2758,21 @@ var BridgeHub = class {
 	* (`{ runtime, revision, models: [{ id, title, ... }] }`). `ctx.model`'s item
 	* shape is unverified (A10 probe did not expand it), so fields are read
 	* defensively and a title falls back to the id, which the Connector requires.
+	*
+	* One row per id: the server's `validate_model_catalog` rejects the **whole**
+	* catalog over a repeated `id` or `selectionId`, and the host legitimately
+	* lists the same model id under two providers. Without collapsing them here a
+	* single repeat poisons the catalog and every notification queued behind it —
+	* observed on the real machine as 16× `duplicate model id` with the runtime
+	* stuck before `running`. The first entry wins; its id doubles as the
+	* selection id, which is still what the host needs to switch to that model.
 	*/
 	async #listModels(values) {
 		const items = await collectCatalogItems(this.#modelApi);
 		if (items === null) throw new RpcFault(RPC_ERROR_CODES.methodNotFound, RPC_ERROR_DATA.unsupportedOperation, "the host exposes no model catalog (ctx.model.list/transform)");
 		const models = [];
+		const seenModelIds = /* @__PURE__ */ new Set();
+		const duplicateModelIds = [];
 		for (const raw of items) {
 			const fallbackId = firstString(raw["modelID"]);
 			const rawId = firstString(raw["id"]);
@@ -2763,6 +2781,11 @@ var BridgeHub = class {
 			if (modelId === null) continue;
 			const providerId = firstString(raw["providerID"]);
 			const id = rawId === null && providerId !== null ? `${providerId}/${modelId}` : modelId;
+			if (seenModelIds.has(id)) {
+				duplicateModelIds.push(id);
+				continue;
+			}
+			seenModelIds.add(id);
 			const title = firstString(raw["title"]) ?? name ?? id;
 			const description = firstString(raw["description"]);
 			models.push({
@@ -2772,6 +2795,7 @@ var BridgeHub = class {
 				selectionId: id
 			});
 		}
+		if (duplicateModelIds.length > 0) this.#logger.warn("model catalog repeats an id; kept the first entry per id", { duplicates: [...new Set(duplicateModelIds)] });
 		return {
 			runtime: RUNTIME,
 			revision: 1,
