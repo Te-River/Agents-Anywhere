@@ -77,7 +77,8 @@ curl -s -u "opencode:$PW" -H "$DIRH" "http://127.0.0.1:$PORT/api/model" | head -
 | 授权页「拉起默认浏览器」：不硬编码浏览器/ProgID、URL 原样传递、失败回退且 fail-soft | `src/server/browser-opener.ts`（argv 直传：win32 `rundll32.exe url.dll,FileProtocolHandler <url>` → 回退 `explorer.exe <url>`；darwin `open`；linux `xdg-open`；全程不经 shell）；守护测试 `tests/unit/browser-opener.test.ts`：断言命令行不含 `edge\|chrome\|firefox\|iexplore\|msedge\|MSEdgeHTM\|ChromeHTML`，且含 `&` 与 `%` 的授权 URL 逐字符原样传入 |
 
 | **宿主自带 HTTP 面（`opencode serve`）实测存在**：`GET /api/session`（`{data,cursor}` 分页）、`/api/session/{id}`、`/api/session/{id}/message`、`/api/session/{id}/permission`、`/api/permission/request`、`/api/model`、`/api/provider`、`/api/agent`、`/api/command`、`/api/integration`、`/api/config`、`/api/location`、`/api/event`（SSE，`server.connected` + heartbeat） | 本轮隔离实测（复现命令见 §五「宿主 HTTP 面」）；`opencode v2.0.18`。需要 Basic（`opencode:<serve 日志里的 server password>`）**且**带 `x-opencode-directory: <encodeURIComponent(目录)>`；不带该头时所有路径回落到 Web UI 的 HTML，**任何"200 即存在"的判据都是假信号**（本轮第一次实测就中了这一枪） |
-| **`/api/model` 每条自带 `providerID`**（键：`id,modelID,providerID,family,name,compatibility,package,settings,capabilities,variants,time,cost,status,enabled,limit`） | 同上。⇒ 从 HTTP 面组目录时按 `providerID/modelID` 组键，本不需要插件 `#listModels` 那个"同 id 塌缩"补丁；塌缩只是 `ctx.model` 这一面的补偿 |
+| **`/api/model` 每条带 `providerID`，但 `id` 本身跨 provider 重复**（真机 79 条里 `longcat-2.5-preview-free`、`space-bunny-free`、`mimo-v2.6-pro`、`mimo-v2.6-flash` 等重复） | 本轮对活服务实测。⇒ **换到 HTTP 面并不能免掉重复 id 问题**；正确做法是按 `providerID/modelID` 组目录键（两条都保留、都可选），而不是像 `#listModels` 那样塌成一条。本行更正本文件上一版"HTTP 面天然分键、不必塌缩"的错判 |
+| **宿主服务可被外来进程直连，无需插件**：`~/.local/state/opencode/service.json` = `{id, version, url, pid, password}`；`GET /api/info` 带 `Authorization: Basic opencode:<password>` 返回 `{version, pid, urls[], paths.tmp}`；客户端须比对 `pid`/`version` 判记录是否过期（二进制内建逻辑如此） | 本轮实测：`/api/info` → HTTP 200 `{"version":"2.0.18","pid":18772,"urls":["http://127.0.0.1:49374"],…}`。密码可用 `OPENCODE_PASSWORD` / `OPENCODE_SERVER_PASSWORD` 固定（二进制内 `L6("OPENCODE_PASSWORD").pipe(cK(()=>L6("OPENCODE_SERVER_PASSWORD")))`） |
 | `/api/health`、`/api/doc`、`/api/question/request`、`/api/session/{id}/children`、`/api/session/{id}/fork` 在 2.0.18 **不存在**（404） | 同上（逐条取 HTTP 码） |
 
 ## 三、未验证项（附原因）
@@ -86,7 +87,8 @@ curl -s -u "opencode:$PW" -H "$DIRH" "http://127.0.0.1:$PORT/api/model" | head -
 | --- | --- | --- |
 | **桌面 App 的 TUI（用户实际宿主）装载与可用面** | 不可干扰 PID 9016（用户服务），该宿主未实跑；其 role=cli context 可能比 CLI 更丰富，属**未证**。CLI 侧已证实：全量 `opencode` 装载、`mini` 不加载、`/aa` 命令**不存在**（无注册面） | `opencode-tui-pty/01` §3/§4/§5、§7④ |
 | **`keymap.layer` 的可写性与入参形状** | 该成员在 A10 的真实 ctx 里**存在**（属 `keymap` 成员表），但其可写性/参数形状**未在真机确认**；本轮按「是函数才尝试调用、否则静默 `none`」实现，未验证注册是否成功 | `src/tui/index.ts:registerCommandLayer`；`tests/unit/tui-commands.test.ts`；`opencode-tui-pty/01` §4 |
-| **已结案（实测，判词为否）：`parentID` 在 2.0.18 的 HTTP 面同样不暴露** | `GET /api/session` 列表与 `GET /api/session/{id}` 详情只有 `id,projectID,cost,tokens,time,title,location`；`POST /api/session` 带 `parentID` 被接受但**静默忽略**；`/api/session/{id}/children` = 404。⇒ 这条不是"插件落点选错"，换成宿主自带服务面也拿不到子会话归属，插件侧 fail-closed 属宿主边界 | 本轮隔离实测（§五「宿主 HTTP 面」）；`subagent/02` §5 |
+| **已结案（真机活服务实测，判词为「能」）：`GET /api/session` 暴露 `parentID`** | 用户机器上活着的共享服务（`~/.local/state/opencode/service.json` → `url=http://127.0.0.1:49374`、`pid=18772`、`version=2.0.18`）返回 50 条会话，**其中 39 条带 `parentID`**。⇒ 子会话归属在 HTTP 面上**可以**认领 | 本轮实测；`subagent/02` §5 |
+| **已结案（判词为「否」，且本行更正本文件上一版结论）：新建会话时 `parentID` 会被忽略** | 隔离空库里 `POST /api/session {"parentID":…}` 被接受但静默丢弃，回读列表与详情都无该键；`/api/session/{id}/children` 在 2.0.18 的 115 条路由里不存在。**注意**：本行曾写作"HTTP 面同样不暴露 parentID"——那是拿**没有子会话的隔离库**当样本得出的错判，列表面与创建面是两件事 | 本轮实测（§五「宿主 HTTP 面」） |
 | 子会话内 `permission.asked` 的 sessionID 归属 | 需真实模型跑一次工具；子会话需 `task` 工具派生 ⇒ 需可用模型 | `subagent/02` §5、§6 |
 | `ctx.session.{create,prompt,interrupt,switchModel,switchAgent}` 的真实入参形状 | `create({parentID})` 三种入参形状均被忽略（落库 `parent_id` 为 NULL），其余方法入参未逐个实测 | `subagent/02` §4.1、§4.6 |
 | A11：permission hook 返回字符串能否改写 `effect` | spike 未冒险自动放行，只证 `undefined` 不改变 effect | `p0/01` §4「未测：返回 allow/deny 字符串能否改写 effect」 |
@@ -96,6 +98,9 @@ curl -s -u "opencode:$PW" -H "$DIRH" "http://127.0.0.1:$PORT/api/model" | head -
 | macOS/Linux 全链路实测 | 全部实证只在 Windows（2.0.18） | `opencode-audit/01` §5 |
 | **真实平台浏览器启动未实跑**：`rundll32`/`explorer`/`open`/`xdg-open` 均未在真机真开一次浏览器 | 本机测试以注入的假 `run` 断言 argv 与回退链，**不真开浏览器**；真机启动需图形会话且会干扰用户桌面 | `tests/unit/browser-opener.test.ts`（假 `run`） |
 | **真实宿主注入 `ctx.options` 的形态未实跑**：`options.autoLogin` / `options.loginMode` 等是否真被 OpenCode 传入插件 `setup()` | 无可用模型网关，真机 TUI（`role=cli`）装载未跑；仅按 `setup(input)` 契约编码 | README「配置项（`options`）与环境变量」；本文件 §四 |
+
+| **HTTP 面的 location 语义未证**：真机 `GET /api/session` 带与不带 `x-opencode-directory: D:/Github/Agents-Anywhere` 都返回同样的 50 条 ⇒ 该头**没有**在列表上起到 rev3 裁定 1 要求的"只暴露本 location 会话"作用（可能该路由不按 location 过滤，也可能值格式/权限另有要求） | 只做了两个样本的对照，未穷举多目录实例；换形态前必须先把这条测透——它是"串台"防线的地基 | 本轮对活服务的对照 GET |
+| **`/api/permission/request` 与 `/api/session/{id}/permission/{requestID}/reply` 的实际可用性未证** | 实测时该面返回 0 条待审批（没有正在跑的回合），只证路由存在且返回 200；`reply` 未发过真请求（会改宿主状态） | 本轮实测 + `openapi.json` 115 条路由 |
 
 ## 四、被阻塞项（附解除条件）
 
