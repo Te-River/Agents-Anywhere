@@ -62,12 +62,13 @@ def test_projects_a_turn_in_stored_order() -> None:
     assert types_and_roles(items) == [
         ("turn.start", "user"),
         ("message", "user"),
-        ("message", "assistant"),
+        ("system", "assistant"),
         ("message", "assistant"),
         ("tool", "tool"),
         ("turn.end", None),
     ]
     assert [item.order_seq for item in items] == [1, 2, 3, 4, 5, 6]
+    assert items[2].content["kind"] == "reasoning", "thinking must be distinguishable without an item metadata column"
     assert items[2].content["text"] == "先看目录"
     assert items[2].metadata["reasoning"] is True
     assert items[3].content["text"] == "**根因确认**"
@@ -252,6 +253,6 @@ def test_two_tool_calls_sharing_a_native_id_stay_distinct_rows() -> None:
 def test_garbage_rows_are_skipped_without_breaking_the_stream() -> None:
     rows = ["nope", {"type": "user"}, sample()[1], {"id": "msg_x", "type": "assistant", "content": "not-a-list"}]
     items = project(rows)
-    # The assistant message yields reasoning + text + tool; the id-less user row
-    # and the string-content assistant are dropped.
-    assert [item.type for item in items] == ["message", "message", "tool"]
+    # The assistant message yields reasoning (a `system` item) + text + tool; the
+    # id-less user row and the string-content assistant are dropped.
+    assert [item.type for item in items] == ["system", "message", "tool"]

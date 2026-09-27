@@ -209,18 +209,28 @@ def project_messages(rows: Sequence[Any], *, session_id: str) -> Projection:
                     continue
                 part_type = part.get("type")
                 if part_type in ("text", "reasoning"):
+                    reasoning = part_type == "reasoning"
                     emit(
                         native_key=f"{part_type}:{native_id}:{ordinal}",
-                        item_type="message",
+                        # Codex carries thinking as a `system` item with content
+                        # kind `reasoning`, and the Hub's timeline row has no
+                        # metadata column (measured against a live server), so a
+                        # flag in metadata alone would make thinking
+                        # indistinguishable from prose on the client.
+                        item_type="system" if reasoning else "message",
                         status="done",
                         role="assistant",
-                        content=_markdown(_text(part.get("text"))),
+                        content=(
+                            {"kind": "reasoning", "text": _text(part.get("text"))}
+                            if reasoning
+                            else _markdown(_text(part.get("text")))
+                        ),
                         source_event="message.assistant",
                         turn_id=turn_id,
                         native_item_id=native_id,
                         metadata={
                             "ordinal": ordinal,
-                            **({"reasoning": True} if part_type == "reasoning" else {}),
+                            **({"reasoning": True} if reasoning else {}),
                             **extra,
                         },
                     )
