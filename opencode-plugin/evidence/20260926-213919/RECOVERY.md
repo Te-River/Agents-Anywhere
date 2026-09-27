@@ -23,19 +23,24 @@ git 库；SHA 取自会话库 `session_message.data → $.snapshot.start|end`，
 
 | 级别 | 判据 | 份数 |
 | --- | --- | --- |
-| A | `execute` 正文 + 同文件 `read` 页里取到的原始信封，字节数与黑板**逐份相等** | 14 |
-| B | 同 A，但没有 `read` 页可取信封，信封按该次工具调用时刻重建（长度固定，故字节数仍**逐份相等**；仅信封时间戳可能与原值差几秒） | 4 |
+| A | `execute` 正文 + 同文件 `read` 页取到的**原始信封**，字节数与黑板自报**逐份相等** | 14 |
+| B | 同 A，但无 `read` 页可取信封，信封按该次工具调用时刻**重建**（长度固定，字节数仍逐份相等；仅信封时间戳可能与原值差几秒） | 5 |
 | C | 只有 `read` 分页可拼（无黑板字节数可对）；用 `VERIFICATION.md` 已引用的行号与章节逐条反查确认 | 4 |
-| D | 只有 `tm_board_write` 入参，黑板返回值未捕获 ⇒ **文件名是按正文自称的角色重建的** | 1 |
+| D | 只有 `tm_board_write` 入参、返回值未捕获 ⇒ **文件名按正文自称的角色重建** | 1 |
+| E | 黑板入参但拿不到字节数，且正文偏短 ⇒ **疑为摘要，不作判据引用** | 2 |
+
+合计 26 份报告。
 
 - **B**：`opencode-credential/01-general-credential-contract-fix.md`、
   `opencode-research/01-researcher-connector-runtime-architecture.md`、
   `opencode-research/02-researcher-opencode-plugin-capabilities.md`、
-  `opencode-research/03-researcher-opencode-multi-plugin-coexistence.md`
+  `opencode-research/03-researcher-opencode-multi-plugin-coexistence.md`、
+  `opencode-selfhost/01-implementer-selfhost-report.md`
 - **C**：`opencode-design/01-architect-integration-design.md`、`opencode-p0/01-implementer-spike-results.md`、
   `opencode-p2/03-implementer-fix-rev3.md`、`opencode-p5/01-implementer-server-web-implementation.md`
 - **D**：`opencode-verify/01-tester-bridge-integration-verification.md`（正文首行自称"验证者：tester"，
   故取此名；`VERIFICATION.md` 没有引用它）
+- **E**：`opencode-bridge-handshake/board-report.md`（461 B）、`opencode-spawn/board-findings.md`（750 B）
 
 ## 引用行反查结果（级别 A/B/C 的症状层判据）
 
@@ -47,6 +52,12 @@ git 库；SHA 取自会话库 `session_message.data → $.snapshot.start|end`，
 | `opencode-design/02` L83 / L109 | A12 `Plugin.define(...)` 与 `export default {id, setup\|effect}` 等价性（待核验项） |
 | `opencode-research/03` L117 | `8. 零运行时依赖：不依赖 v2 SDK（Plugin.define 是恒等…）` |
 | `opencode-p0/01` §0–§10 | 含被引用的 §3.4、§4、§6、§8 全部在位 |
+
+级别 B 的 `opencode-selfhost/01` 另有一次**不依赖恢复脚本**的独立复核：本轮开头从残骸里读到过它的原文，
+恢复后逐条回查 5 处独有内容——`便携 PostgreSQL 16.4 @55432`、一次性
+`setup-token: uUP9Ve9yQRa5iDQdhtFL5i2K`、关闭命令 `Stop-Process -Id 30492,9128`、
+`Redis-8.10.2-Windows-x64-msys2`、`README 的 head（v2_35）与实际（v2_38）` —— 全部命中（158 行 / 9744 字节）。
+该文件也是任务「真机端到端复验」所需的自建实例启动配方。
 
 ## 已知不完整处
 
