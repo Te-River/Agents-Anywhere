@@ -315,9 +315,15 @@ export class SyncFeed {
         continue
       }
       if (change.type === 'catalogs') {
-        if (this.native.ctx.get('llm')) await this.runtimeOperation('models', async () => this.notification('catalog.model.update', { ...await this.native.catalogs.models() }))
-        if (this.native.ctx.get('permissionPresets')) await this.runtimeOperation('permissions', async () => this.notification('catalog.permission.update', this.native.catalogs.permissions()))
-        await this.runtimeOperation('capabilities', async () => this.notification('runtime.capability.updated', await this.native.capabilities()))
+        if (change.catalogType === 'model' && this.native.ctx.get('llm')) {
+          await this.runtimeOperation('models', async () => this.notification('catalog.model.update', { ...await this.native.catalogs.models() }))
+        }
+        if (change.catalogType === 'permission' && this.native.ctx.get('permissionPresets')) {
+          await this.runtimeOperation('permissions', async () => this.notification('catalog.permission.update', this.native.catalogs.permissions()))
+        }
+        if (change.catalogType === 'model') {
+          await this.runtimeOperation('capabilities', async () => this.notification('runtime.capability.updated', await this.native.capabilities()))
+        }
         continue
       }
       if (change.type === 'visibility') { reconcile = true; continue }

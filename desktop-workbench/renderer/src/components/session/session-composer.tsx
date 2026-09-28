@@ -4,6 +4,7 @@ import * as React from "react"
 import { ArrowUp, Check, ChevronDown, Loader2, Square } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,9 +38,11 @@ import {
   catalogItemDisabledReason,
   catalogItemEnabled,
   catalogI18nText,
+  isDshAutoReviewPermission,
   modelCatalogDisplayName,
   modelIdsForSelectionId,
   permissionIdForSelectionId,
+  permissionCatalogI18nText,
   selectionIdForModelCatalog,
   selectionIdForPermissionCatalog,
 } from "@/components/session/catalog-selection"
@@ -181,12 +184,14 @@ export function SessionComposer({
   const [selectedReasoning, setSelectedReasoning] = React.useState("")
   const permissionItems = permissionCatalog?.permissions.map((item) => ({
     id: item.id,
-    label: catalogI18nText(tNew, item.metadata, "labelKey", item.displayName),
-    description: catalogI18nText(tNew, item.metadata, "descriptionKey", item.description),
+    label: permissionCatalogI18nText(tNew, permissionCatalog, item, "labelKey"),
+    description: isDshAutoReviewPermission(permissionCatalog, item.id)
+      ? undefined : permissionCatalogI18nText(tNew, permissionCatalog, item, "descriptionKey"),
     default: item.default,
     enabled: catalogItemEnabled(item),
     disabledReason: catalogItemDisabledReason(item),
     selectionId: item.selectionId,
+    badge: isDshAutoReviewPermission(permissionCatalog, item.id) ? "EXP" : undefined,
   })) ?? []
   const modelItems = modelCatalog?.models.map((item) => ({
     id: item.id,
@@ -217,7 +222,10 @@ export function SessionComposer({
   const modelValue = modelSelectionValue?.modelId ?? ""
   const effortValue = modelSelectionValue?.reasoningId ?? ""
   const permissionLabel =
-    permissionItems.find((item) => item.id === selectedPermissionMode)?.label ?? (dsh ? actualPermission?.name : null) ?? tNew("permissionMode")
+    permissionItems.find((item) => item.id === selectedPermissionMode)?.label ??
+    (dsh && actualPermission
+      ? catalogI18nText(tNew, { preset: actualPermission.id }, "labelKey", actualPermission.name)
+      : null) ?? tNew("permissionMode")
   const modelLabel = selectedModelItem?.label ?? (dsh && actualModel?.model ? `${actualModel.model}（${actualModel.provider}）` : tNew("model"))
   const effortLabel = effortItems.find((item) => item.id === selectedReasoning)?.label ?? (dsh ? actualModel?.reasoningEffort : null) ?? tNew("reasoning")
   const hasSelectors = Boolean(permissionItems.length > 0 || modelItems.length > 0)
@@ -493,6 +501,9 @@ export function SessionComposer({
                       >
                         <span className="size-1.5 shrink-0 rounded-full bg-primary" />
                         <span className="min-w-0 truncate text-foreground">{permissionLabel}</span>
+                        {permissionItems.find((item) => item.id === selectedPermissionMode)?.badge
+                          ? <Badge variant="secondary">EXP</Badge>
+                          : null}
                         <ChevronDown className="size-3.5 opacity-60" />
                       </Button>
                     </DropdownMenuTrigger>
@@ -509,7 +520,10 @@ export function SessionComposer({
                         >
                           <Check className={cn("mt-0.5 size-3.5", selectedPermissionMode === item.id ? "opacity-100" : "opacity-0")} />
                           <span className="min-w-0 flex-1">
-                            <span className="block font-medium leading-none">{item.label}</span>
+                            <span className="flex items-center gap-2 font-medium leading-none">
+                              <span>{item.label}</span>
+                              {item.badge ? <Badge variant="secondary">{item.badge}</Badge> : null}
+                            </span>
                             {(item.enabled ? item.description : item.disabledReason) ? (
                               <span className="mt-1 block whitespace-normal text-xs leading-snug text-muted-foreground">
                                 {item.enabled ? item.description : item.disabledReason}

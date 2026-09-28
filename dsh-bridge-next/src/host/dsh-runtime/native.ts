@@ -5,6 +5,7 @@ import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionRecord } from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type {} from '@deepseek-ai/dsh-storage-domain'
+import type {} from '@deepseek-ai/dsh-permission-presets'
 import { realpath, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join } from 'node:path'
 import { canonicalJson, digest, userMessageId } from './identity.js'
@@ -30,7 +31,7 @@ export type NativeChange = { type: 'stream', id: string, turn: number, step: num
   | { type: 'session', id: string } | { type: 'status', id: string }
   | { type: 'refresh', id: string }
   | { type: 'question', id: string } | { type: 'approval', id: string } | { type: 'capabilities' }
-  | { type: 'visibility' } | { type: 'catalogs' }
+  | { type: 'visibility' } | { type: 'catalogs', catalogType: 'model' | 'permission' }
 export interface NativeWorkspace { id: string, title: string, path: string, sessionIds: string[] }
 
 /** Configuration facts a session state read needs, without retaining the event log. */
@@ -64,9 +65,10 @@ export class NativeRuntime {
     readonly diagnostics = new RuntimeDiagnostics(ctx.logger('agents-anywhere-runtime'))) {
     this.creations = new CreationIntents(creationDirectory)
     this.attachments = new RuntimeAttachments(join(dirname(creationDirectory), 'attachments'))
-    this.catalogs = new RuntimeCatalogs(ctx, () => this.emit({ type: 'catalogs' }))
+    this.catalogs = new RuntimeCatalogs(ctx, () => this.emit({ type: 'catalogs', catalogType: 'model' }))
     this.configuration = new RuntimeConfiguration(ctx)
     ctx.on('llm/adapters-updated', () => this.catalogs.invalidate(), { global: true })
+    ctx.on('permission-presets/catalog-changed', () => this.emit({ type: 'catalogs', catalogType: 'permission' }), { global: true })
     for (const key of ['sessionController', 'permissionPresets', 'commands', 'agentPresets', 'attachments', 'fileUploads'] as const) {
       ctx.inject([key], child => {
         this.emit({ type: 'capabilities' })

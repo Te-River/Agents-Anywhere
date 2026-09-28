@@ -1,4 +1,4 @@
-# DSH 用户问答
+# DSH 用户问答与审批
 
 已接入 DSH 的 `ask_user_question`、计划审阅和权限审批。沿用平台既有 `inputRequest` v1、notice、接管权限和回应接口，由各端已有的问答／审批组件显示。
 

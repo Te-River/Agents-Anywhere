@@ -153,3 +153,37 @@ test('catalogs omit defaults, distinguish provider routes before filtering and t
     router.close()
   } finally { await f.ctx.fiber.dispose(); await rm(home, { recursive: true, force: true }) }
 })
+
+test('Auto review contribution changes the live permission catalog and selection availability', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'aa-auto-review-catalog-'))
+  const f = await nativeRuntime(home, ctx => mountAgents(ctx, new TextAdapter()))
+  const runtime = f.ctx.agentsAnywhereRuntime.native
+  const changes: string[] = []
+  const unwatch = runtime.watch(change => {
+    if (change.type === 'catalogs') changes.push(change.catalogType)
+  })
+  try {
+    const before = runtime.catalogs.permissions()
+    assert.ok(!before.permissions.some(item => item.metadata.preset === 'auto'))
+
+    const removeAuto = f.ctx.permissionPresets.registerAuto(() => {})
+    await until(() => changes.includes('permission'))
+    const withAuto = runtime.catalogs.permissions()
+    assert.ok(withAuto.revision > before.revision)
+    assert.equal(withAuto.permissions.at(-1)?.metadata.preset, 'auto')
+    assert.equal(withAuto.permissions.at(-1)?.title, 'Auto review')
+    await runtime.configuration.validate({ permission: permissionSelectionId('auto') })
+
+    changes.length = 0
+    await removeAuto()
+    await until(() => changes.includes('permission'))
+    const after = runtime.catalogs.permissions()
+    assert.ok(after.revision > withAuto.revision)
+    assert.ok(!after.permissions.some(item => item.metadata.preset === 'auto'))
+    await assert.rejects(runtime.configuration.validate({ permission: permissionSelectionId('auto') }), /unavailable/)
+  } finally {
+    unwatch()
+    await f.ctx.fiber.dispose()
+    await rm(home, { recursive: true, force: true })
+  }
+})

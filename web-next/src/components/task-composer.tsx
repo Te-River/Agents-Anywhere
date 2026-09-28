@@ -5,6 +5,7 @@ import { Monitor, ChevronDown, ArrowUp, Loader2, Check } from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
 import { useSidebar } from "@/components/ui/sidebar"
 import { Spinner } from "@/components/ui/spinner"
@@ -55,9 +56,12 @@ import {
   catalogItemDisabledReason,
   catalogItemEnabled,
   catalogI18nText,
+  isDshAutoReviewPermission,
   modelCatalogDisplayName,
   modelIdsForSelectionId,
   permissionIdForSelectionId,
+  permissionCatalogI18nText,
+  permissionSelectionForNewSessionPreference,
   selectionIdForModelCatalog,
   selectionIdForPermissionCatalog,
 } from "@/components/session/catalog-selection"
@@ -269,6 +273,7 @@ export function TaskComposer() {
   const [selectedModel, setSelectedModel] = React.useState("")
   const [selectedReasoning, setSelectedReasoning] = React.useState("")
   const [selectedPermissionMode, setSelectedPermissionMode] = React.useState("")
+  const [permissionRefreshKey, setPermissionRefreshKey] = React.useState(0)
   const [workspace, setWorkspace] = React.useState<WorkspaceSelection | null>(null)
   const [projectEditor, setProjectEditor] = React.useState<ProjectEditorState>(null)
   const [prompt, setPrompt] = React.useState("")
@@ -474,6 +479,42 @@ export function TaskComposer() {
     CAPABILITY.permissionCatalog,
     selectedRuntimeScope,
   )
+  React.useEffect(() => {
+    if (!authSession?.accessToken || !selectedConnectorId || !selectedRuntimeId ||
+      selectedRuntime?.runtimeType !== "dsh" || !canUsePermissionCatalog) return
+    let cancelled = false
+    let pending = false
+    const refresh = async () => {
+      if (pending || document.visibilityState === "hidden") return
+      pending = true
+      try {
+        const result = await dashboardApi.getConnectorRuntimePermissionCatalog(
+          authSession.accessToken, selectedConnectorId, selectedRuntimeId,
+        )
+        if (!cancelled) setPermissionCatalog((current) =>
+          current?.runtime === result.catalog.runtime &&
+          current.revision === result.catalog.revision &&
+          JSON.stringify(current.permissions) === JSON.stringify(result.catalog.permissions)
+            ? current : result.catalog,
+        )
+      } catch {
+        // Focus and the interval retry without hiding the current options.
+      } finally {
+        pending = false
+      }
+    }
+    const onVisible = () => { if (document.visibilityState === "visible") void refresh() }
+    void refresh()
+    window.addEventListener("focus", onVisible)
+    document.addEventListener("visibilitychange", onVisible)
+    const timer = window.setInterval(() => { void refresh() }, 5_000)
+    return () => {
+      cancelled = true
+      window.removeEventListener("focus", onVisible)
+      document.removeEventListener("visibilitychange", onVisible)
+      window.clearInterval(timer)
+    }
+  }, [authSession?.accessToken, canUsePermissionCatalog, permissionRefreshKey, selectedRuntimeId, selectedConnectorId, selectedRuntime?.runtimeType])
   const canUseAttachments = capabilityIsUsable(
     runtimeCapabilities,
     CAPABILITY.attachment,
@@ -512,12 +553,14 @@ export function TaskComposer() {
   const permissionOptions = React.useMemo(
     () => permissionCatalog?.permissions.map((item) => ({
       id: item.id,
-      label: catalogI18nText(t, item.metadata, "labelKey", item.displayName),
-      description: catalogI18nText(t, item.metadata, "descriptionKey", item.description),
+      label: permissionCatalogI18nText(t, permissionCatalog, item, "labelKey"),
+      description: isDshAutoReviewPermission(permissionCatalog, item.id)
+        ? undefined : permissionCatalogI18nText(t, permissionCatalog, item, "descriptionKey"),
       default: item.default,
       enabled: catalogItemEnabled(item),
       disabledReason: catalogItemDisabledReason(item),
       selectionId: item.selectionId,
+      badge: isDshAutoReviewPermission(permissionCatalog, item.id) ? "EXP" : undefined,
     })) ?? [],
     [permissionCatalog, t],
   )
@@ -565,7 +608,9 @@ export function TaskComposer() {
       models,
       permissionOptions,
       modelIdsForSelectionId(modelCatalog, selectionPreference.model),
-      permissionIdForSelectionId(permissionCatalog, selectionPreference.permission),
+      isDshAutoReviewPermission(permissionCatalog, permissionIdForSelectionId(permissionCatalog, selectionPreference.permission))
+        ? ""
+        : permissionIdForSelectionId(permissionCatalog, selectionPreference.permission),
     )
     if (availablePreference.model) {
       setSelectedModel(availablePreference.model.modelId)
@@ -634,7 +679,7 @@ export function TaskComposer() {
     if (!permissionOptions.some((option) => option.id === permission && option.enabled)) return
     setSelectedPermissionMode(permission)
     persistTargetPreference(selectedConnectorId, selectedRuntimeId, {
-      permission: selectionIdForPermissionCatalog(permissionCatalog, permission),
+      permission: permissionSelectionForNewSessionPreference(permissionCatalog, permission),
     })
   }, [permissionCatalog, permissionOptions, persistTargetPreference, selectedRuntimeId, selectedConnectorId])
 
@@ -786,7 +831,7 @@ export function TaskComposer() {
         selectedRuntimeId,
         {
           model: selectedModelSelection,
-          permission: selectedPermissionSelection,
+          permission: permissionSelectionForNewSessionPreference(permissionCatalog, selectedPermissionMode),
         },
       )
       persistPreference(nextPreference)
@@ -913,6 +958,7 @@ export function TaskComposer() {
                 {compactSelectors && hasSelectionSettings ? (
                   <SelectionSettingsDrawer
                     disabled={selectorsLoading}
+                    onOpenChange={(open) => { if (open) setPermissionRefreshKey((key) => key + 1) }}
                     buttonLabel={t("selectionSettings")}
                     title={t("selectionSettings")}
                     description={t("selectionSettingsDescription")}
@@ -929,11 +975,12 @@ export function TaskComposer() {
                   />
                 ) : !compactSelectors ? (
                   <>
-                    {permissionOptions.length > 0 ? <DropdownMenu>
+                    {permissionOptions.length > 0 ? <DropdownMenu onOpenChange={(open) => { if (open) setPermissionRefreshKey((key) => key + 1) }}>
                       <DropdownMenuTrigger asChild>
                         <Button variant="ghost" size="sm" className="min-w-0 shrink gap-1.5 text-muted-foreground">
                           {permissionOptions.length > 0 ? <span className="size-1.5 shrink-0 rounded-full bg-primary" /> : null}
                           <span className="min-w-0 truncate text-foreground">{permissionLabel}</span>
+                          {selectedPermissionOption?.badge ? <Badge variant="secondary">{selectedPermissionOption.badge}</Badge> : null}
                           <ChevronDown className="size-3.5 opacity-50" />
                         </Button>
                       </DropdownMenuTrigger>
@@ -950,7 +997,10 @@ export function TaskComposer() {
                           >
                             <Check className={cn("mt-0.5 size-3.5", selectedPermissionMode === item.id ? "opacity-100" : "opacity-0")} />
                             <span className="min-w-0 flex-1">
-                              <span className="block font-medium leading-none">{item.label}</span>
+                              <span className="flex items-center gap-2 font-medium leading-none">
+                                <span>{item.label}</span>
+                                {item.badge ? <Badge variant="secondary">{item.badge}</Badge> : null}
+                              </span>
                               {(item.enabled ? item.description : item.disabledReason) ? (
                                 <span className="mt-1 block whitespace-normal text-xs leading-snug text-muted-foreground">
                                   {item.enabled ? item.description : item.disabledReason}

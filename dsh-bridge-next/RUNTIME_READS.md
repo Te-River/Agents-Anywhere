@@ -2,7 +2,7 @@
 
 ## 当前实现
 
-2026-09-08：图片与配置功能已恢复；保留桥接日志和单会话历史读取失败隔离。读取继续使用官方 `ctx.sessionQuery`，不会直接解析、修复或改写原生日志。当前验证状态见 [验证记录](./VERIFICATION.md)。
+当前支持文本、图片和普通文件、模型与权限配置、用户问答、计划审批及工具权限审批，并提供运行日志和单会话历史读取失败隔离。读取继续使用官方 `ctx.sessionQuery`，不会直接解析、修复或改写原生日志。当前验证状态见 [验证记录](https://github.com/anywhere-labs/Agents-Anywhere/blob/edeb4f6c/dsh-bridge-next/VERIFICATION.md)。
 
 插件 Host 独立挂载 `agentsAnywhereRuntime`，要求官方 `sessions`、`sessionQuery`、`workspaceRegistry` 服务就绪。官方 `sessionController` 服务存在时提供消息发送和配置；目录与附件能力按对应官方服务分别声明。是否登录、是否打开手机连接弹窗、是否发现 AA Desktop，都不会决定 runtime 端口是否启动。
 
@@ -19,7 +19,7 @@
 - `history.ts`、`tools.ts`：原始事件转换为统一 Timeline。Python 不解释 DSH 原始消息。
 - `identity.ts`：沿用共享协议的会话 ID、Timeline ID 和内容哈希算法；握手传入 runtime instance 的 `sessionNamespace`，区分平台归属。
 
-官方 API 与声明按 npm `0.1.2-rc.1` 验证。Host 完整日志通过 `sessionQuery.observeSession(id, { projectionMode: 'none' })` 的不可变 observation 读取；无 Host 的兼容 reader 仍使用 `readSession`，不使用仅代表当前模型上下文的 `readSurface`。不创建新的会话内容数据库。
+插件适配最新版 DSH；当前开发依赖与自动化检查使用 DSH SDK `0.1.5-rc.2`。Host 完整日志通过 `sessionQuery.observeSession(id, { projectionMode: 'none' })` 的不可变 observation 读取；无 Host 的兼容 reader 仍使用 `readSession`，不使用仅代表当前模型上下文的 `readSurface`。不创建新的会话内容数据库。
 
 ## 发现与添加
 
@@ -65,7 +65,7 @@ Connector 先验证发现文件、进程与回环地址，再执行限时鉴权�
 
 读取、投影、图片回执和配置状态异常按会话隔离；快照不能完成时撤销该捕获，保留 AA 已接收的历史。全局清单或交付失败只替换同步订阅，Connector 延迟后重新订阅；普通 RPC 继续使用同一连接。会话刷新、后续原生事件和新的清单均可触发重试，不需要重启进程来清除错误。
 
-主动读取的历史按同一捕获分页，每帧最多 1,000 条且内容小于 7 MiB；单条超限明确失败。游标绑定连接、会话和捕获，120 秒后过期。Python 收齐所有页才返回完整快照；指定 limit 截断时 complete=false。事件订阅的初始历史每页最多 250 条，收齐后通过现有 timeline.sync 完整替换；随后只推增量，断线重连重新校准，不再定时扫描 DSH。详见 [事件同步方案](./RUNTIME_SYNC_PLAN.md)。
+主动读取的历史按同一捕获分页，每帧最多 1,000 条且内容小于 7 MiB；单条超限明确失败。游标绑定连接、会话和捕获，120 秒后过期。Python 收齐所有页才返回完整快照；指定 limit 截断时 complete=false。事件订阅的初始历史每页最多 250 条，收齐后通过现有 timeline.sync 完整替换；随后只推增量，断线重连重新校准，不再定时扫描 DSH。详见 [事件同步方案](https://github.com/anywhere-labs/Agents-Anywhere/blob/edeb4f6c/dsh-bridge-next/RUNTIME_SYNC_PLAN.md)。
 
 ## 验证与本地试用
 
@@ -80,7 +80,7 @@ uv run pytest tests/test_dsh_contracts.py tests/test_dsh_provider.py tests/test_
 
 链接安装的插件完成构建后，手动重启 DSH Host 以加载新后端；正在运行的旧 Connector 也需要重新启动以加载新的 Python 适配器。在 Web 设备页面或 onboarding 点击 DeepSeek Harness 的“一键配置”，然后查看该设备已有的 DSH 会话与历史。
 
-纯文本新建/续聊、实时消息、工具状态与中断已接入官方 Agent 服务。`ask_user_question` 已接入平台现有问答表单，包含回答、取消、多端收起和断线恢复，见 [用户问答](./USER_QUESTIONS.md)。下一阶段处理附件、模型/权限目录和权限审批。Windows 实机、长时间运行及真实模型界面验收仍需手动进行。
+纯文本新建/续聊、实时消息、工具状态与中断已接入官方 Agent 服务。`ask_user_question` 已接入平台现有问答表单，包含回答、取消、多端收起和断线恢复，见 [用户问答](https://github.com/anywhere-labs/Agents-Anywhere/blob/39043f6a/dsh-bridge-next/USER_QUESTIONS.md)。附件、模型与权限目录、工具权限审批及计划审批也已接入；实际可用能力取决于宿主提供的官方服务。Windows 实机、长时间运行及真实模型界面验收仍需手动进行。
 
 
 ## 性能优化（2026-09-10）

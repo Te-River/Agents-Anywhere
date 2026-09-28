@@ -345,9 +345,12 @@
       "permissionMode": "Permission mode",
       "permissionModes": {
         "dsh": {
-          "readOnly": { "label": "read-only" },
-          "workspaceWrite": { "label": "workspace-write" },
-          "fullAccess": { "label": "danger-full-access" }
+          "readOnly": { "label": "Read Only" },
+          "workspaceWrite": { "label": "Workspace Write" },
+          "fullAccess": { "label": "Full access" },
+          "auto": {
+            "label": "Auto review"
+          }
         },
         "requestApproval": {
           "label": "Request approval",
