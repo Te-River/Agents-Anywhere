@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -281,15 +282,29 @@ def test_an_empty_success_body_is_not_read_as_an_outage() -> None:
     assert run(scenario()).result["applied"] == ["model"]
 
 
-def test_scoped_queries_use_the_hosts_own_spelling_of_the_location() -> None:
-    # The host compares `?directory=` case-sensitively, so what goes out must be
-    # the string the host itself reports, not what was typed into the config.
+HOST_SPELLINGS = [
+    # Any spelling that resolves to the same place is a match: the runtime must
+    # query with the string the host reports, not the one from the config.
+    ("/work/repo", "/work/./repo"),
+    pytest.param(
+        "d:/work/repo",
+        "D:\\Work\\Repo",
+        id="windows-case-spelling",
+        marks=pytest.mark.skipif(os.name != "nt", reason="case-insensitive paths only exist on Windows"),
+    ),
+]
+
+
+@pytest.mark.parametrize("configured,reported", HOST_SPELLINGS)
+def test_scoped_queries_use_the_hosts_own_spelling_of_the_location(configured: str, reported: str) -> None:
+    # The host compares `?directory=` with its own spelling, so what goes out must
+    # be the string it reports, not what was typed into the config.
     routes = dict(BASE_ROUTES)
-    routes[("GET", "/api/debug/location")] = [{"directory": "D:\\Work\\Repo"}]
+    routes[("GET", "/api/debug/location")] = [{"directory": reported}]
     routes[("GET", "/api/session")] = [
-        {"id": EXTERNAL, "location": {"directory": "D:\\Work\\Repo"}, "time": {"updated": 10}}
+        {"id": EXTERNAL, "location": {"directory": reported}, "time": {"updated": 10}}
     ]
-    runtime, host = build(routes, values={"location": "d:/work/repo"})
+    runtime, host = build(routes, values={"location": configured})
 
     async def scenario() -> Any:
         await runtime.start()
@@ -299,7 +314,7 @@ def test_scoped_queries_use_the_hosts_own_spelling_of_the_location() -> None:
     scoped = [call for call in host.query if call[1] in ("/api/session", "/api/model", "/api/agent", "/api/command")]
     assert scoped, "the runtime must scope its location-bound queries"
     for _method, _path, params in scoped:
-        assert ("directory", "D:\\Work\\Repo") in params, params
+        assert ("directory", reported) in params, params
 
 
 # ------------------------------------------------------------------- inventory
