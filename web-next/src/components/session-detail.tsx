@@ -23,6 +23,7 @@ import { cn } from "@/lib/utils"
 import { dashboardApi } from "@/features/dashboard/api"
 import type {
   Notice,
+  ProtocolAgentCatalog,
   ProtocolCapabilitySet,
   ProtocolEventEnvelope,
   ProtocolModelCatalog,
@@ -116,6 +117,7 @@ type SessionRemoteState = {
   catalogs: {
     model?: ProtocolModelCatalog
     permission?: ProtocolPermissionCatalog
+    agent?: ProtocolAgentCatalog
     [key: string]: unknown
   }
 }
