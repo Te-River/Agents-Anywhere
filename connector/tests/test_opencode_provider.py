@@ -319,6 +319,40 @@ def test_discovery_reads_the_registration_from_the_configured_state_dir(tmp_path
     assert result.metadata["servicePid"] == 18772
 
 
+def test_a_state_dir_naming_the_registration_directory_itself_is_found(
+    tmp_path: Path,
+) -> None:
+    # "stateDir" reads as the XDG state home and as the directory holding
+    # service.json. OpenCode writes the former layout, but pointing at either one
+    # must find the same registration, or a correct-looking config silently means
+    # "no OpenCode here".
+    payload = {
+        "id": "i",
+        "version": "2.0.18",
+        "url": "http://127.0.0.1:49374",
+        "pid": 18772,
+        "password": "pw",
+    }
+    (tmp_path / "service.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def factory(item: OpenCodeService) -> OpenCodeServerClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/info"
+            return httpx.Response(
+                200, json={"version": "2.0.18", "pid": item.pid, "urls": [], "paths": {"tmp": "T"}}
+            )
+
+        return OpenCodeServerClient(item, transport=httpx.MockTransport(handler))
+
+    result = asyncio.run(
+        serve_discovery.discover(
+            {"stateDir": str(tmp_path), "location": DIRECTORY}, client_factory=factory
+        )
+    )
+    assert result.available is True, result.reason
+    assert result.metadata["servicePid"] == 18772
+
+
 def test_registry_dir_always_points_at_the_opencode_subdirectory(tmp_path: Path) -> None:
     # `stateDir` is the XDG state home: both branches must append `opencode`,
     # or a configured value silently means something different from the default.

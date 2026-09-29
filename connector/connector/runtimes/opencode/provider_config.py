@@ -28,7 +28,7 @@ def opencode_config_schema() -> dict[str, Any]:
                 "type": "string",
                 "minLength": 1,
                 "title": "OpenCode state directory",
-                "description": "OpenCode's XDG state home; the registration is read at `<stateDir>/opencode/service.json`. Defaults to `$XDG_STATE_HOME` (or `~/.local/state`).",
+                "description": "OpenCode's XDG state home; the registration is read at `<stateDir>/opencode/service.json`. Defaults to `$XDG_STATE_HOME` (or `~/.local/state`). Pointing this at the directory that holds `service.json` directly is also accepted.",
             },
             "servicePid": {
                 "type": "integer",

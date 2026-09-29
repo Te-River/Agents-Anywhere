@@ -99,7 +99,8 @@ class TestVerify:
         asyncio.run(run())
 
     def test_stale_pid_is_unavailable(self) -> None:
-        handler = lambda request: httpx.Response(200, json={"version": "2.0.18", "pid": 999})
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"version": "2.0.18", "pid": 999})
 
         async def run() -> None:
             client = client_for(handler)
@@ -112,7 +113,8 @@ class TestVerify:
         asyncio.run(run())
 
     def test_version_drift_is_unavailable(self) -> None:
-        handler = lambda request: httpx.Response(200, json={"version": "2.0.16", "pid": 18772})
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"version": "2.0.16", "pid": 18772})
 
         async def run() -> None:
             client = client_for(handler)

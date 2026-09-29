@@ -37,12 +37,32 @@ class OpenCodeService:
 
 def service_file(state_home: Path | str | None = None) -> Path:
     """Where OpenCode registers its service: `$XDG_STATE_HOME/opencode/service.json`."""
+    base = _state_base(state_home)
+    return base / SERVICE_DIR_NAME / SERVICE_FILENAME
+
+
+def _state_base(state_home: Path | str | None) -> Path:
+    if state_home is not None:
+        return Path(state_home)
     import os
 
-    base = Path(state_home) if state_home is not None else Path(
-        os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
-    )
-    return base / SERVICE_DIR_NAME / SERVICE_FILENAME
+    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+
+
+def _service_candidates(state_home: Path | str | None) -> tuple[Path, ...]:
+    """Registration paths to try, in order.
+
+    OpenCode itself only ever writes `<state-home>/opencode/service.json`, which is
+    what the unconfigured lookup uses. An explicitly configured `stateDir` is
+    user-supplied, and the natural reading of that field name is also "the directory
+    holding service.json", so both spellings are accepted -- canonical first, so a
+    directory that somehow carries both still resolves the host's own layout.
+    """
+    base = _state_base(state_home)
+    canonical = base / SERVICE_DIR_NAME / SERVICE_FILENAME
+    if state_home is None:
+        return (canonical,)
+    return (canonical, base / SERVICE_FILENAME)
 
 
 def read_service(state_home: Path | str | None = None) -> OpenCodeService | None:
@@ -51,11 +71,16 @@ def read_service(state_home: Path | str | None = None) -> OpenCodeService | None
     Never raises: a missing file means "OpenCode is not running here", which the
     runtime reports as unavailable rather than as a failure of our own.
     """
+    raw: Any = None
     path = service_file(state_home)
-    try:
-        raw: Any = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    for candidate in _service_candidates(state_home):
+        try:
+            raw = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(raw, dict):
+            path = candidate
+            break
     if not isinstance(raw, dict):
         return None
     url = raw.get("url")

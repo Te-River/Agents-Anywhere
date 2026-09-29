@@ -20,7 +20,6 @@ from connector.runtime_protocol.host import RuntimeHostClient
 from connector.runtimes.opencode import provider_config
 from connector.runtimes.opencode.serve import discovery as serve_discovery
 from connector.runtimes.opencode.serve.runtime import OpenCodeServiceRuntime
-from connector.runtimes.opencode.serve.service import read_service
 
 OPENCODE_CONFIG_SCHEMA_REVISION = 2
 
