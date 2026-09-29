@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process'
-import { access, mkdir } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
@@ -9,6 +9,7 @@ import { writeJson } from '../storage/files.js'
 import { DEFAULT_CONNECTOR_SETTINGS, type ConnectorSettings } from '../../contracts/connector.js'
 import { resolveUv } from './environment.js'
 import { ConnectorLogs } from './logs.js'
+import { materializeConnectorProject } from './project.js'
 
 const runFile = promisify(execFile)
 const MAX_FRAME = 1024 * 1024
@@ -73,6 +74,8 @@ export class SourceConnector implements ConnectorProcess {
   private listeners = new Set<(state: ConnectorState) => void>()
   private readonly closed = new WeakSet<ChildProcessWithoutNullStreams>()
   private readonly logs: ConnectorLogs
+  /** 可写的项目副本；uv 只在这个目录里写 uv.lock，绝不碰插件包目录。 */
+  private projectDir: string | null = null
   constructor(private readonly config: ResolvedConfig, private readonly launch: ConnectorLauncher = spawn,
     private readonly settings: () => ConnectorSettings = () => DEFAULT_CONNECTOR_SETTINGS,
     private readonly firstRequestTimeoutMs = FIRST_REQUEST_TIMEOUT,
@@ -100,12 +103,8 @@ export class SourceConnector implements ConnectorProcess {
   }
 
   async prepare(settings = this.settings()): Promise<void> {
-    try {
-      await access(join(this.config.connectorSourceDir, 'pyproject.toml'))
-      await access(join(this.config.connectorSourceDir, 'connector', 'cli.py'))
-    } catch {
-      throw new Error('未找到内部 Connector 源码，请重新构建插件或配置 connectorSourceDir。')
-    }
+    // uv 会在项目目录写 uv.lock，所以插件包目录只当只读负载用，项目落到可写副本里。
+    this.projectDir = await materializeConnectorProject(this.config)
     try {
       const executable = await resolveUv(this.config, settings)
       if (!executable) throw new Error('uv unavailable')
@@ -144,11 +143,14 @@ export class SourceConnector implements ConnectorProcess {
     const command = executable ?? (settings.uvPath || this.config.uvPath)
     const pypiIndexUrl = settings.uvPypiIndexUrl || 'https://pypi.org/simple'
     signal.throwIfAborted()
+    // 不依赖 prepare() 的调用顺序：start() 自己也要保证项目副本就位。
+    const projectDir = this.projectDir ??= await materializeConnectorProject(this.config)
+    signal.throwIfAborted()
     const child = this.launch(command, [
-      'run', '--directory', this.config.connectorSourceDir,
+      'run', '--directory', projectDir,
       'anywhere-cli', 'rpc', '--config', configPath,
     ], {
-      cwd: this.config.connectorSourceDir,
+      cwd: projectDir,
       windowsHide: true,
       detached: process.platform !== 'win32',
       env: {
@@ -186,6 +188,7 @@ export class SourceConnector implements ConnectorProcess {
     const abort = () => { void this.stop() }
     signal.addEventListener('abort', abort, { once: true })
     try {
+      signal.throwIfAborted()
       // Includes the first uv dependency installation, not just Python startup.
       this.updateState(await this.call('connector.getState', this.firstRequestTimeoutMs))
       signal.throwIfAborted()

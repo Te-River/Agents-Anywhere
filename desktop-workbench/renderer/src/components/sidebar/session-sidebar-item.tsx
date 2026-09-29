@@ -40,6 +40,7 @@ import { useWorkspace } from "@/components/workspace-context"
 
 export function SessionSidebarItem({
   item,
+  meta = null,
   inset = false,
   isActive,
   onOpen,
@@ -48,6 +49,8 @@ export function SessionSidebarItem({
   onRename,
 }: {
   item: { runtime: string; runtimeType?: string; id: string; connectorId: string; projectId?: string | null; cwd?: string | null; title?: string | null; status: string; unread: boolean; pinned: boolean; archived: boolean }
+  /** Optional `device · agent` identity line for sessions shown outside projects. */
+  meta?: string | null
   inset?: boolean
   isActive: boolean
   onOpen: () => void
@@ -127,7 +130,7 @@ export function SessionSidebarItem({
                 onClick={onOpen}
                 className={cn(
                   "text-muted-foreground data-[active=true]:text-foreground",
-                  showContext && "h-auto flex-col items-stretch gap-1",
+                  (showContext || meta) && "h-auto flex-col items-stretch gap-1",
                   inset && "pl-6 has-[>svg:first-child]:pl-6",
                   !hasStatusIndicator && "group-hover/session:pr-[4.25rem] group-focus-within/session:pr-[4.25rem]",
                   isActive && !hasStatusIndicator && "pr-[4.25rem]",
@@ -149,6 +152,11 @@ export function SessionSidebarItem({
                     className="w-full flex-none text-xs font-normal text-muted-foreground"
                   />
                 ) : null}
+                {meta ? (
+                  <span className="block w-full min-w-0 truncate text-[11px] leading-4 text-muted-foreground/80">
+                    {meta}
+                  </span>
+                ) : null}
               </SidebarMenuButton>
             </div>
           </ContextMenuTrigger>
@@ -164,7 +172,7 @@ export function SessionSidebarItem({
               <div
                 className={cn(
                   "absolute right-1 top-1/2 hidden -translate-y-1/2 items-center gap-0.5",
-                  showContext && "top-4",
+                  (showContext || meta) && "top-4",
                   "group-hover/session:flex group-focus-within/session:flex",
                   isActive && "flex",
                 )}

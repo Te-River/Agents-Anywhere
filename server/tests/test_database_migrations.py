@@ -37,10 +37,6 @@ def _sqlite_url(path) -> str:
     return f"sqlite+aiosqlite:///{path}"
 
 
-def _index_names(engine, table: str) -> set[str]:
-    return {index["name"] for index in inspect(engine).get_indexes(table)}
-
-
 def test_protocol_clock_revisions_use_64_bit_columns() -> None:
     assert isinstance(connector_protocol_capabilities.c.revision.type, BigInteger)
     assert isinstance(connector_runtime_catalogs.c.revision.type, BigInteger)
@@ -1129,12 +1125,29 @@ def test_unversioned_runtime_schema_is_classified_by_actual_columns(
     )
 
 
-def test_current_schema_version_is_v2_38() -> None:
-    assert CURRENT_SCHEMA_REVISION == "v2_38"
-    assert CURRENT_SCHEMA_VERSION == "2.38"
+def test_current_schema_version_is_v2_39() -> None:
+    assert CURRENT_SCHEMA_REVISION == "v2_39"
+    assert CURRENT_SCHEMA_VERSION == "2.39"
 
 
-def test_v2_37_adds_oauth_device_code_storage(tmp_path) -> None:
+def test_v2_37_adds_session_title_source(tmp_path) -> None:
+    path = tmp_path / "session-title-source.sqlite3"
+    url = _sqlite_url(path)
+    upgrade_database(db_url=url, revision="v2_36")
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        before = {column["name"] for column in inspect(engine).get_columns("sessions")}
+        assert "title_source" not in before
+        upgrade_database(db_url=url)
+        upgrade_database(db_url=url)
+        after = {column["name"] for column in inspect(engine).get_columns("sessions")}
+    finally:
+        engine.dispose()
+
+    assert "title_source" in after
+
+
+def test_v2_38_adds_oauth_device_code_storage(tmp_path) -> None:
     path = tmp_path / "oauth-device-codes.sqlite3"
     url = _sqlite_url(path)
     upgrade_database(db_url=url, revision="v2_36")
@@ -1156,7 +1169,7 @@ def test_v2_37_adds_oauth_device_code_storage(tmp_path) -> None:
         engine.dispose()
 
 
-def test_v2_37_restores_a_missing_user_code_index(tmp_path) -> None:
+def test_v2_38_restores_a_missing_user_code_index(tmp_path) -> None:
     """A rerun must add the user-code index even when the table pre-exists.
 
     SQLite DDL is not transactional, so an upgrade killed between CREATE TABLE
@@ -1193,7 +1206,7 @@ def test_v2_37_restores_a_missing_user_code_index(tmp_path) -> None:
         engine.dispose()
 
 
-def test_v2_38_adds_opencode_agent_facts(tmp_path) -> None:
+def test_v2_39_adds_opencode_agent_facts(tmp_path) -> None:
     path = tmp_path / "opencode-agents.sqlite3"
     url = _sqlite_url(path)
     upgrade_database(db_url=url, revision="v2_37")

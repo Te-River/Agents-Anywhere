@@ -61,7 +61,7 @@ macOS、Windows 和 Android 的下载文件均为 **Agents Anywhere** 安装包�
 | Logo | 简介 |
 | --- | --- |
 | <a href="https://dshdesktop.cn/sponsors/wuying"><img src="docs/images/sponsors/wuying-cloud-computer-logo.png" alt="阿里云无影云电脑" width="96"></a> | [**阿里云 · 无影云电脑**](https://dshdesktop.cn/sponsors/wuying)<br>感谢 **阿里云** 无影云电脑赞助本项目！无影云电脑个人版面向个人用户提供云上电脑服务，将计算、存储和桌面环境放在云端，支持在多类终端上接入使用，并可按需选择不同规格，适合远程办公、学习、开发和轻量创作等场景。<br><br>[**打开微信注册 →**](https://dshdesktop.cn/sponsors/wuying) |
-| <a href="https://88api.ai/sign-up?aff=vQMT"><img src="docs/images/sponsors/88api-logo.png" alt="88API" width="120"></a> | [**88API**](https://88api.ai/sign-up?aff=vQMT)<br>88API 是一站式多模型 API 聚合平台，平台由海外企业运营，稳定高效支持开票。平台提供 DeepSeek 官转和开源渠道，价格低至 5 折，完美适配 DSH Desktop 项目。一个 API Key 即可统一接入海内外多种模型，覆盖文本对话、图片、音频、音乐和视频生成接口，适用于 AI 编程、Agent 自动化、内容创作及应用开发。<br><br>[**立即注册 →**](https://88api.ai/sign-up?aff=vQMT) |
+| <a href="https://88api.ai/sign-up?aff=vQMT"><img src="docs/images/sponsors/88api-logo.png" alt="88API" width="120"></a> | [**88API Token 聚合平台**](https://88api.ai/sign-up?aff=vQMT)<br><br>🧠 聚合 GPT、Claude、Gemini、Grok、DeepSeek、Kimi、GLM 等语言与编程模型；<br>🎨 图片模型：GPT-Image、Gemini、Grok 等；<br>🎬 视频模型：Seedance、Veo、MiniMax H3、Kling、Grok 等；<br>🎙️ 语音能力：Whisper、TTS 等。从文案、出图、改图，到视频生成与配音<br>🎁新用户注册送体验额度，可以检测模型能力。站内有人工客服值守！<br>👉香港正规企业运营 稳定供应 全绿满血 不降智 提供发票<br><br>[**立即注册 →**](https://88api.ai/sign-up?aff=vQMT) |
 
 </details>
 

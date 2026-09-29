@@ -1,5 +1,11 @@
 # DSH Bridge Next 验证记录
 
+## DSH 0.2.0-rc.1 适配（2026-09-28）
+
+插件源码版本保持 `2.0.1`，DSH 依赖和 Typert peer 锁定到 `0.2.0-rc.1`，运行时上报的 DSH 版本与技术说明同步更新。`corepack yarn check` 完成类型检查、Host/Client 构建、产物检查和 **174 项插件测试**，全部通过；测试使用新版官方 Gateway、SessionQuery、AgentLoop 和 Python Connector 链路。
+
+在全新临时 `DSH_HOME` 中，使用官方 `@deepseek-ai/dsh@0.2.0-rc.1` 的 `dsh plugin --profile aa-rc1-smoke add "link:$PWD"` 安装成功，`--dump-config` 包含 `agents-anywhere-bridge-next` 配置行。未进行 DSH Desktop、Windows、付费模型或手机实机验收。当前源码仍使用已发布的 `2.0.1` 版本号；此记录只验证本地源码。
+
 ## DSH 0.1.7-rc.2 适配（2026-09-25）
 
 开发依赖切换到 npm 发布的 `0.1.7-rc.2`，按新版包元数据更新 Cordis、Loader 和 Schemastery。历史投影读取新版顶层 tool-role 结果及 `tool/ptc-dispatch*` 事件，同时保留旧日志格式；投影版本升为 3，旧检查点触发快照重建，Connector 同时接受版本 2 和 3。预设测试组合迁移到官方 preset registry / preset 插件，补齐新版文件系统和模型目录要求。

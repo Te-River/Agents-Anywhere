@@ -109,7 +109,11 @@ HOST_METHODS = (
 )
 
 
-def build(routes: dict[tuple[str, str], Any], values: dict[str, Any] | None = None) -> tuple[OpenCodeServiceRuntime, Recorder]:
+def build(
+    routes: dict[tuple[str, str], Any],
+    values: dict[str, Any] | None = None,
+    service_reader: Any = None,
+) -> tuple[OpenCodeServiceRuntime, Recorder]:
     host = Recorder()
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -123,7 +127,7 @@ def build(routes: dict[tuple[str, str], Any], values: dict[str, Any] | None = No
     runtime = OpenCodeServiceRuntime(
         RuntimeConfig(RUNTIME_NAME, 1, values={"location": DIRECTORY, **(values or {})}),
         SimpleNamespace(connector_id="conn_test", session_namespace="ns_test", **{k: getattr(host, k) for k in HOST_METHODS}),
-        service_reader=lambda: SERVICE,
+        service_reader=service_reader or (lambda: SERVICE),
         client_factory=lambda service: OpenCodeServerClient(service, transport=httpx.MockTransport(handler)),
     )
     return runtime, host
@@ -833,3 +837,78 @@ def test_a_session_row_event_only_updates_the_row_for_this_location() -> None:
     metas = published(host, "meta")
     assert metas and metas[0]["title"] == "改名了"
     assert metas[0]["external_session_id"] == EXTERNAL
+
+
+# ------------------------------------------------ review findings on the pin
+#
+# The reviewer reproduced four configuration/recovery behaviours with fixtures.
+# These are those fixtures: a pin that did not pin, a re-registration nobody
+# followed, and `maxRestartAttempts=0` that retried anyway.
+
+
+def test_a_pinned_pid_that_is_not_registered_never_connects() -> None:
+    runtime, host = build(dict(BASE_ROUTES), values={"servicePid": 99999, "maxRestartAttempts": 0})
+
+    async def scenario() -> None:
+        await runtime.start()
+
+    run(scenario())
+    _status, detail = host.health[-1]
+    assert detail["code"] == "runtime_unavailable"
+    assert host.requests == [], "refusing a pin mismatch must happen before any request leaves the process"
+    assert runtime.pinned_pid == 99999
+
+
+def test_a_re_registered_service_is_followed_instead_of_failing_reads() -> None:
+    first = OpenCodeService(url="http://127.0.0.1:49374", pid=10101, version="2.0.18", password="pw", path=Path("s.json"))
+    second = OpenCodeService(url="http://127.0.0.1:50505", pid=20202, version="2.0.18", password="pw", path=Path("s.json"))
+    holder = {"service": first}
+    ports: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        ports.append(request.url.port or 0)
+        if request.url.path == "/api/info":
+            return httpx.Response(200, json={"version": "2.0.18", "pid": holder["service"].pid, "urls": []})
+        if request.url.path == "/api/debug/location":
+            return envelope([{"directory": DIRECTORY}])
+        if request.url.path == "/api/session":
+            return envelope(SESSION_ROWS)
+        return httpx.Response(404, json={"_tag": "NotFound"})
+
+    host = Recorder()
+    runtime = OpenCodeServiceRuntime(
+        RuntimeConfig(RUNTIME_NAME, 1, values={"location": DIRECTORY, "maxRestartAttempts": 0}),
+        SimpleNamespace(connector_id="conn_test", session_namespace="ns_test", **{k: getattr(host, k) for k in HOST_METHODS}),
+        service_reader=lambda: holder["service"],
+        client_factory=lambda service: OpenCodeServerClient(service, transport=httpx.MockTransport(handler)),
+    )
+
+    async def scenario() -> Any:
+        await runtime.start()
+        before = await runtime.list_sessions(limit=2)
+        holder["service"] = second
+        after = await runtime.list_sessions(limit=2)
+        await runtime.stop()
+        return before, after
+
+    before, after = run(scenario())
+    assert [row.external_session_id for row in after] == [row.external_session_id for row in before]
+    assert set(ports) == {49374, 50505}, "reads after the re-registration must go to the new endpoint"
+
+
+def test_zero_restart_attempts_means_no_re_read_of_the_registration() -> None:
+    reads: list[int] = []
+
+    def reader() -> None:
+        reads.append(1)
+        return None
+
+    runtime, host = build(dict(BASE_ROUTES), values={"maxRestartAttempts": 0}, service_reader=reader)
+
+    async def scenario() -> None:
+        await runtime.start()
+
+    run(scenario())
+    assert len(reads) == 1, "an explicit 0 must not become the default three retries"
+    assert runtime._restart_task is None
+    assert runtime._restart_exhausted is True

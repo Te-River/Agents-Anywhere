@@ -11,6 +11,17 @@ Agents Anywhere 侧对端中转」这一形态决策的判据来源；插件形�
 二进制逆向在副本上进行（`D:\桌面\Opencode逆向\opencode-cli.exe`，205,848,968 字节），
 原安装目录未做任何修改。
 
+## 0. 形态决策：为什么不做进程内插件（产品决定，2026-09-28）
+
+接入 **Agents Anywhere 客户端**（连接器直连宿主自带服务面），而不是 OpenCode 自带插件，理由有三：
+
+1. **维护与发版异常麻烦**：插件要跟着 OpenCode 的每个版本验一遍，发版还要走 Git 规格安装；
+2. **用户无法自动更新插件**：装出去的就是冻结的构建产物（本仓库曾为此提交 4.9 万行 `lib/`）；
+3. **有可能损坏配置文件**：插件形态需要碰宿主配置与进程内 hook，而对端形态对宿主零写入。
+
+因此 `opencode-plugin/` 已整体退役，取证报告保留在
+[`docs/opencode-plugin-evidence/`](opencode-plugin-evidence/)；本文以下全部是**对端形态**的实测判据。
+
 ## 1. 服务发现：一台机器一个共享服务
 
 - 注册文件：`$XDG_STATE_HOME/opencode/service.json`（默认 `~/.local/state/opencode/service.json`），

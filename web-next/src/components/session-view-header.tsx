@@ -12,12 +12,15 @@ import { WorkspaceHeader } from "@/components/workspace-header"
 import { WorkspaceSidebarToggleButton } from "@/components/workspace-sidebar-toggle-button"
 import { DashboardSidebarToggle } from "@/components/dashboard-sidebar-toggle"
 import { useWorkspace } from "@/components/workspace-context"
+import { useAuth } from "@/components/auth/auth-context"
+import { dshAgentPresetLabel, dshAgentPresetOptions } from "@/features/dashboard/dsh-agent-presets"
+import { rememberDshSessionPreset, useDshSessionPreset } from "@/features/dashboard/dsh-session-presets"
 import type { SessionMemorySnapshot } from "@/components/session-detail"
 import { cn } from "@/lib/utils"
 import { useTranslations } from "next-intl"
 import type { SessionView as SessionViewModel } from "@/lib/demo-api"
 import { runtimeLabel } from "@/components/session/session-utils"
-import { sessionRuntimeType } from "@/features/dashboard/runtime-instances"
+import { sessionRuntimeId, sessionRuntimeType } from "@/features/dashboard/runtime-instances"
 
 type SessionViewHeaderProps = {
   session: SessionViewModel
@@ -40,11 +43,34 @@ export function SessionViewHeader({
   toolsOpen,
   onToggleTools,
 }: SessionViewHeaderProps) {
-  const { renameSession } = useWorkspace()
+  const { renameSession, runtimes } = useWorkspace()
+  const { session: authSession } = useAuth()
   const tSession = useTranslations("dashboard.session")
+  const tPreset = useTranslations("dashboard.agentPresets")
   const [editingTitle, setEditingTitle] = React.useState(false)
   const [titleDraft, setTitleDraft] = React.useState(session.title ?? "")
   const [renaming, setRenaming] = React.useState(false)
+  const runtimeId = sessionRuntimeId(session)
+  const isDsh = sessionRuntimeType(session) === "dsh"
+  const cachedPreset = useDshSessionPreset(authSession?.userId, isDsh ? session : null)
+  const agentPresetRuntime = runtimes.find((runtime) => runtime.connectorId === session.connectorId && runtime.runtimeId === runtimeId)
+  const currentSnapshot = memorySnapshot?.session.id === session.id ? memorySnapshot : null
+  const agentPreset = currentSnapshot?.state?.metadata.agentPreset
+  const snapshotPresetId = isDsh && typeof agentPreset === "string" && agentPreset.trim() ? agentPreset.trim() : null
+  const agentPresetId = snapshotPresetId ?? cachedPreset?.id
+  const agentPresetLabel = dshAgentPresetOptions(agentPresetRuntime).find((option) => option.id === agentPresetId)?.label
+    ?? (cachedPreset?.id === agentPresetId ? cachedPreset?.label : undefined)
+  const agentPresetName = agentPresetId ? dshAgentPresetLabel(
+    agentPresetId,
+    [{ id: agentPresetId, label: agentPresetLabel ?? agentPresetId, enabled: true }],
+    tPreset,
+  ) : null
+
+  React.useEffect(() => {
+    if (agentPresetId) rememberDshSessionPreset(
+      authSession?.userId, { id: session.id, connectorId: session.connectorId }, agentPresetId, agentPresetLabel,
+    )
+  }, [agentPresetId, agentPresetLabel, authSession?.userId, session.connectorId, session.id])
 
   React.useEffect(() => {
     if (!editingTitle) setTitleDraft(session.title ?? "")
@@ -79,40 +105,52 @@ export function SessionViewHeader({
   return (
     <WorkspaceHeader overlay>
       <DashboardSidebarToggle />
-      {editingTitle ? (
-        <Input
-          autoFocus
-          value={titleDraft}
-          onChange={(event) => setTitleDraft(event.currentTarget.value)}
-          onBlur={cancelRename}
-          onKeyDown={(event) => {
-            if (event.nativeEvent.isComposing) return
-            if (event.key === "Enter") {
-              event.preventDefault()
-              void submitRename()
-            }
-            if (event.key === "Escape") {
-              event.preventDefault()
-              cancelRename()
-            }
-          }}
-          disabled={renaming}
-          aria-label={tSession("renameTitle")}
-          className="h-8 min-w-0 max-w-[min(28rem,40vw)] flex-1 rounded-xl text-sm"
-        />
-      ) : (
-        <button
-          type="button"
-          className="min-w-0 truncate rounded-md px-1 text-left text-sm font-medium hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          title={tSession("renameTitle")}
-          onClick={() => {
-            setTitleDraft(session.title ?? "")
-            setEditingTitle(true)
-          }}
-        >
-          {session.title}
-        </button>
-      )}
+      <div className="flex min-w-0 items-center">
+        {editingTitle ? (
+          <Input
+            autoFocus
+            value={titleDraft}
+            onChange={(event) => setTitleDraft(event.currentTarget.value)}
+            onBlur={cancelRename}
+            onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing) return
+              if (event.key === "Enter") {
+                event.preventDefault()
+                void submitRename()
+              }
+              if (event.key === "Escape") {
+                event.preventDefault()
+                cancelRename()
+              }
+            }}
+            disabled={renaming}
+            aria-label={tSession("renameTitle")}
+            className="h-8 min-w-0 max-w-[min(28rem,40vw)] flex-1 rounded-xl text-sm"
+          />
+        ) : (
+          <button
+            type="button"
+            className="min-w-0 truncate rounded-md px-1 text-left text-sm font-medium hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            title={tSession("renameTitle")}
+            onClick={() => {
+              setTitleDraft(session.title ?? "")
+              setEditingTitle(true)
+            }}
+          >
+            {session.title}
+          </button>
+        )}
+        {agentPresetName ? (
+          <span
+            className="flex min-w-0 shrink-0 items-center text-sm font-medium"
+            aria-label={`${tPreset("label")}: ${agentPresetName}`}
+            title={`${tPreset("label")}: ${agentPresetName}`}
+          >
+            <span aria-hidden="true">·</span>
+            <span className="max-w-32 truncate px-1">{agentPresetName}</span>
+          </span>
+        ) : null}
+      </div>
       <SessionMetaBadge
         session={session}
         connectorName={connectorName}

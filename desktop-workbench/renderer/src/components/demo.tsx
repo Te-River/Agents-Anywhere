@@ -241,7 +241,8 @@ function DesktopResizableShell() {
             </div>
           </ResizablePanel>
           <ResizableHandle
-            className="bg-transparent"
+            showSeparator={false}
+            className="w-0 bg-transparent focus-visible:after:bg-ring/30"
             onPointerDown={(event) => {
               event.currentTarget.setPointerCapture(event.pointerId)
               setSidebarResizeActive(true)

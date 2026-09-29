@@ -80,12 +80,14 @@ export function SessionComposer({
   onInterrupt,
   onCommand,
   onToggleTakeover,
+  attachedAbove = false,
 }: {
   token: string
   session: SessionView
   runtimeState?: SessionRuntimeState | null
   pendingInteractionCount: number
   creatingSession?: boolean
+  attachedAbove?: boolean
   sending: boolean
   interrupting: boolean
   takeoverBusy: boolean
@@ -103,6 +105,7 @@ export function SessionComposer({
     content: string,
     attachments: AttachedFile[],
     selections: { model?: string; permission?: string; agent?: string },
+    mode?: "queue" | "steer",
   ) => Promise<boolean>
   onInterrupt: () => void
   onCommand: (command: string, options: { args: string[]; raw: string }) => void
@@ -141,6 +144,12 @@ export function SessionComposer({
     !isStopping &&
     !isWaitingApproval &&
     !isBlocked
+  const [sendMode, setSendMode] = React.useState<"queue" | "steer">("queue")
+  const canSteer = connectorOnline && !sourceUnavailable && session.takeover && isRunning && capabilityIsUsable(effectiveCapabilities, CAPABILITY.steer, runtimeScope)
+  const sendCapability = findCapability(effectiveCapabilities, CAPABILITY.sendMessage, runtimeScope)
+  const busy = isWaiting || isRunning || isStopping || isWaitingApproval || isBlocked
+  const canQueue = busy && connectorOnline && !sourceUnavailable && Boolean(sendCapability?.supported && sendCapability.allowed)
+  const effectiveSendMode = canSteer ? sendMode : "queue"
   const canUseSendMessage = capabilityIsUsable(effectiveCapabilities, CAPABILITY.sendMessage, runtimeScope)
   const canUseInterrupt = capabilityIsUsable(effectiveCapabilities, CAPABILITY.interrupt, runtimeScope)
   const interruptCapability = findCapability(effectiveCapabilities, CAPABILITY.interrupt, runtimeScope)
@@ -171,11 +180,11 @@ export function SessionComposer({
     onDrop,
   } = useAttachments({ sessionId: creatingSession ? undefined : session.id, token, enabled: canUseAttachments, allowedMimeTypes })
   const canSend =
-    canUseSendMessage &&
+    (busy ? (effectiveSendMode === "steer" ? canSteer : canQueue) : canUseSendMessage) &&
     !creatingSession &&
-    !sending &&
+    (!sending || (busy && effectiveSendMode === "queue")) &&
     !interrupting &&
-    acceptsUserInput
+    (acceptsUserInput || busy)
   const canRunCommand = !creatingSession && !sending && !interrupting && acceptsUserInput
   const hasInput = value.trim().length > 0 || attachments.length > 0
   const attachmentsReady = attachmentsAllowed && (attachments.length === 0 || (allUploaded && !uploadsPending && !uploadFailed))
@@ -185,7 +194,7 @@ export function SessionComposer({
     interruptCapability.allowed &&
     (isWaiting || isRunning || isStopping || isWaitingApproval || isBlocked),
   )
-  const showInterrupt = !creatingSession && canUseInterrupt && activeSessionCanInterrupt
+  const showInterrupt = !value.trim() && attachments.length === 0 && !creatingSession && canUseInterrupt && activeSessionCanInterrupt
   const [selectedPermissionMode, setSelectedPermissionMode] = React.useState("")
   const [selectedModel, setSelectedModel] = React.useState("")
   const [selectedReasoning, setSelectedReasoning] = React.useState("")
@@ -361,7 +370,7 @@ export function SessionComposer({
                 ? tSession("errorPlaceholder")
                 : tSession("replyPlaceholder")
   const commandQuery = commandQueryFromValue(value)
-  const showCommandMenu = commandQuery !== null && attachments.length === 0
+  const showCommandMenu = !busy && commandQuery !== null && attachments.length === 0
   const commandSuggestions = React.useMemo(
     () => runtimeCommands.filter((command) => commandMatchesQuery(command, commandQuery)),
     [commandQuery, runtimeCommands],
@@ -385,7 +394,7 @@ export function SessionComposer({
   const submit = async () => {
     if (!hasInput) return
     const command = commandFromValue(value, commandSuggestions)
-    if (commandQuery !== null && attachments.length === 0) {
+    if (!busy && commandQuery !== null && attachments.length === 0) {
       if (command && canRunCommand) {
         const parsed = parseCommandValue(value)
         updateValue("")
@@ -402,7 +411,7 @@ export function SessionComposer({
       ...(selectedModelSelection ? { model: selectedModelSelection } : {}),
       ...(selectedPermissionSelection ? { permission: selectedPermissionSelection } : {}),
       ...(selectedAgentSelection ? { agent: selectedAgentSelection } : {}),
-    })
+    }, busy ? effectiveSendMode : undefined)
     if (!sent && valueRef.current === "") {
       updateValue(text)
     }
@@ -418,7 +427,7 @@ export function SessionComposer({
 
   return (
     <div
-      className="shrink-0 px-4 pb-4 pt-2"
+      className={cn("shrink-0 px-4 pb-4", attachedAbove ? "pt-0" : "pt-2")}
       onDragEnter={onDragEnter}
       onDragLeave={onDragLeave}
       onDragOver={onDragOver}
@@ -487,7 +496,7 @@ export function SessionComposer({
                 if (event.nativeEvent.isComposing) return
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault()
-                  if (!showInterrupt) void submit()
+                  void submit()
                 }
               }}
               placeholder={placeholder}
@@ -703,16 +712,39 @@ export function SessionComposer({
               )}
               {tSession("takeover")}
             </div>
+            {busy ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button type="button" variant="ghost" size="sm" aria-label={tSession("sendMode")}>
+                    {tSession(effectiveSendMode === "steer" ? "steer" : "queueMessage")}
+                    <ChevronDown className="size-3" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => setSendMode("queue")}>
+                    {tSession("queueMessage")}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem disabled={!canSteer} onSelect={() => setSendMode("steer")}>
+                    {tSession(canSteer ? "steer" : "steerUnavailable")}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
+            {hasInput && !creatingSession && canUseInterrupt && activeSessionCanInterrupt ? (
+              <Button type="button" size="icon" variant="ghost" className="size-8 shrink-0" aria-label={tSession("interrupt")} disabled={interrupting} onClick={onInterrupt}>
+                <Square className="size-4" />
+              </Button>
+            ) : null}
             <span className="mx-1 h-5 w-px shrink-0 bg-border" />
             <Button
               type="button"
               size="icon"
-              aria-label={showInterrupt ? tSession("interrupt") : tSession("send")}
+              aria-label={showInterrupt ? tSession("interrupt") : busy ? tSession(effectiveSendMode === "steer" ? "steer" : "queueMessage") : tSession("send")}
               className={cn("size-8 rounded-full", showInterrupt && "bg-destructive text-destructive-foreground hover:bg-destructive/90")}
               disabled={showInterrupt ? interrupting : !(canSubmitCommand || canSubmitMessage)}
               onClick={primaryAction}
             >
-              {sending || interrupting ? (
+              {(sending && !(busy && effectiveSendMode === "queue")) || interrupting ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : showInterrupt ? (
                 <Square className="size-4" />

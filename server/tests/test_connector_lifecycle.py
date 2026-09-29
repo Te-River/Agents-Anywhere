@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from conftest import ApiV2TestClient
 from starlette.websockets import WebSocketDisconnect
 from test_backend_mvp import create_connector_and_session, make_client
+
+from agent_server.app import create_app
 
 
 def test_revocation_invalidates_previously_issued_access_token(tmp_path):
@@ -132,6 +135,9 @@ def test_failed_delete_keeps_revoked_tombstone_and_can_finish_on_retry(tmp_path)
 
 
 def test_runtime_deletion_cancels_old_queue_and_retires_legacy_identity(tmp_path):
+    from runtime_fixtures import seed_runtime_inventory
+    from test_runtime_config import _inventory
+
     from agent_server.api.connector_ingress import _ConnectorNotificationPump
     from agent_server.core.models import ConnectorIngestRequest
     from agent_server.services.connector_ingest import ConnectorIngestService
@@ -139,8 +145,6 @@ def test_runtime_deletion_cancels_old_queue_and_retires_legacy_identity(tmp_path
         ConnectorNotificationService,
     )
     from agent_server.services.connector_realtime import ConnectorRealtimeService
-    from runtime_fixtures import seed_runtime_inventory
-    from test_runtime_config import _inventory
 
     client = make_client(tmp_path)
     connector_id, _, session_id, _ = create_connector_and_session(client)
@@ -253,8 +257,9 @@ def test_runtime_deletion_cancels_old_queue_and_retires_legacy_identity(tmp_path
 
 
 def test_pending_deletion_is_resumed_without_purging_legacy_revoked_rows(tmp_path):
-    from agent_server.infra.db import connectors as connectors_t
     from sqlalchemy import update
+
+    from agent_server.infra.db import connectors as connectors_t
 
     client = make_client(tmp_path)
     connector_id, _, session_id, _ = create_connector_and_session(client)
@@ -314,3 +319,152 @@ def test_runtime_pause_discards_queued_work_after_reconfiguration():
         await pump.close()
 
     asyncio.run(run())
+
+
+def _ingest_runtime_title(client, token, session_id, title):
+    return client.post(
+        "/connector/ingest",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "notifications": [
+                {
+                    "method": "session.meta.upsert",
+                    "params": {
+                        "sessionId": session_id,
+                        "runtime": "codex",
+                        "title": title,
+                    },
+                }
+            ]
+        },
+    )
+
+
+def test_manual_rename_survives_connector_title_sync(tmp_path):
+    client = make_client(tmp_path)
+    _, token, session_id, headers = create_connector_and_session(client)
+
+    renamed = client.patch(
+        f"/sessions/{session_id}/meta",
+        headers=headers,
+        json={"title": "renamed by hand"},
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["session"]["title"] == "renamed by hand"
+
+    response = _ingest_runtime_title(client, token, session_id, "thread title")
+    assert response.status_code == 200, response.text
+    assert asyncio.run(client.app.state.store.get_session(session_id)).title == (
+        "renamed by hand"
+    )
+
+
+def test_connector_title_still_applies_without_manual_rename(tmp_path):
+    client = make_client(tmp_path)
+    _, token, session_id, _ = create_connector_and_session(client)
+
+    response = _ingest_runtime_title(client, token, session_id, "thread title")
+    assert response.status_code == 200, response.text
+    assert asyncio.run(client.app.state.store.get_session(session_id)).title == (
+        "thread title"
+    )
+
+
+def test_connector_resync_upsert_keeps_manual_title(tmp_path):
+    client = make_client(tmp_path)
+    connector_id, _, session_id, headers = create_connector_and_session(client)
+
+    renamed = client.patch(
+        f"/sessions/{session_id}/meta",
+        headers=headers,
+        json={"title": "renamed by hand"},
+    )
+    assert renamed.status_code == 200, renamed.text
+
+    async def run():
+        return await client.app.state.store.upsert_connector_session(
+            connector_id=connector_id,
+            session_id=session_id,
+            runtime="codex",
+            runtime_id="codex",
+            external_session_id=f"thr_{connector_id}_demo",
+            title="thread title",
+        )
+
+    assert asyncio.run(run()).title == "renamed by hand"
+
+
+def test_manual_title_survives_archive_restore_and_application_restart(tmp_path):
+    client = make_client(tmp_path)
+    _, _, session_id, headers = create_connector_and_session(client)
+    renamed = client.patch(
+        f"/sessions/{session_id}/meta",
+        headers=headers,
+        json={"title": "  user-owned title  "},
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["session"]["title"] == "user-owned title"
+
+    for archived in (True, False):
+        response = client.patch(
+            f"/sessions/{session_id}/meta",
+            headers=headers,
+            json={"archived": archived},
+        )
+        assert response.status_code == 200, response.text
+
+    # Reopen the existing database; make_client would replace it with a fixture.
+    restarted = ApiV2TestClient(create_app(tmp_path / "test.sqlite3"))
+    snapshot = asyncio.run(
+        restarted.app.state.store.update_session_snapshot(
+            session_id=session_id,
+            title="connector title after restart",
+        )
+    )
+    assert snapshot.title == "user-owned title"
+
+
+def test_connector_rescan_alias_keeps_manual_title(tmp_path):
+    client = make_client(tmp_path)
+    connector_id, _, session_id, headers = create_connector_and_session(client)
+    renamed = client.patch(
+        f"/sessions/{session_id}/meta",
+        headers=headers,
+        json={"title": "user-owned title"},
+    )
+    assert renamed.status_code == 200, renamed.text
+
+    async def rescan():
+        return await client.app.state.store.upsert_connector_session(
+            connector_id=connector_id,
+            session_id="new-scan-alias",
+            runtime="codex",
+            runtime_id="codex",
+            external_session_id=f"thr_{connector_id}_demo",
+            title="title from rescanned inventory",
+            cwd="/repo",
+        )
+
+    session = asyncio.run(rescan())
+    assert session.id == session_id
+    assert session.title == "user-owned title"
+
+
+def test_explicit_same_title_rename_claims_title_ownership(tmp_path):
+    client = make_client(tmp_path)
+    _, token, session_id, headers = create_connector_and_session(client)
+    blank = client.patch(
+        f"/sessions/{session_id}/meta",
+        headers=headers,
+        json={"title": "  "},
+    )
+    assert blank.status_code == 422, blank.text
+    renamed = client.patch(
+        f"/sessions/{session_id}/meta",
+        headers=headers,
+        json={"title": "Demo"},
+    )
+    assert renamed.status_code == 200, renamed.text
+    synced = _ingest_runtime_title(client, token, session_id, "runtime changed")
+    assert synced.status_code == 200, synced.text
+    assert asyncio.run(client.app.state.store.get_session(session_id)).title == "Demo"

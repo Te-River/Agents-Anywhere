@@ -55,6 +55,16 @@ The macOS, Windows and Android files are **Agents Anywhere** installers hosted i
 
 </details>
 
+<details open>
+<summary>❤️ Sponsors</summary>
+
+| Logo | Description |
+| --- | --- |
+| <a href="https://dshdesktop.cn/sponsors/wuying"><img src="docs/images/sponsors/wuying-cloud-computer-logo.png" alt="Alibaba Cloud Wuying Cloud Computer" width="96"></a> | [**Alibaba Cloud · Wuying Cloud Computer**](https://dshdesktop.cn/sponsors/wuying)<br>Thank you to **Alibaba Cloud** Wuying Cloud Computer for sponsoring this project! Wuying Cloud Computer Personal Edition provides cloud computers for individual users, hosting computing resources, storage, and desktop environments in the cloud. Access your computer from a variety of devices and choose specifications to suit your needs, whether for remote work, learning, development, or light creative tasks.<br><br>[**Open WeChat to register →**](https://dshdesktop.cn/sponsors/wuying) |
+| <a href="https://88api.ai/sign-up?aff=vQMT"><img src="docs/images/sponsors/88api-logo.png" alt="88API" width="120"></a> | [**88API Token Aggregation Platform**](https://88api.ai/sign-up?aff=vQMT)<br><br>🧠 Access language and coding models including GPT, Claude, Gemini, Grok, DeepSeek, Kimi, and GLM;<br>🎨 Image models: GPT-Image, Gemini, Grok, and more;<br>🎬 Video models: Seedance, Veo, MiniMax H3, Kling, Grok, and more;<br>🎙️ Speech capabilities: Whisper, TTS, and more. From copywriting and image generation and editing to video generation and voiceovers.<br>🎁 New users receive trial credits upon registration to test model capabilities. Live customer support is available on the site!<br>👉 Operated by a registered Hong Kong company · Stable availability · Fully operational, full-capability service · No reduced model intelligence · Invoices available<br><br>[**Sign up now →**](https://88api.ai/sign-up?aff=vQMT) |
+
+</details>
+
 ## Agents and workspaces
 
 <p align="center">

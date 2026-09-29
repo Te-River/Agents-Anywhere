@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import importlib
 import time
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from typing import Any, Literal, TypeVar
 
-from openai_codex import JsonRpcError, MethodNotFoundError
+from openai_codex import JsonRpcError, MethodNotFoundError, TransportClosedError
 from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
     AskForApproval,
@@ -30,7 +32,12 @@ from openai_codex.generated.v2_all import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from connector.logging import logger
-from connector.runtime_protocol import RuntimeConfig, RuntimeConflictError, RuntimeInvalidRequestError
+from connector.runtime_protocol import (
+    RuntimeConfig,
+    RuntimeConflictError,
+    RuntimeInvalidRequestError,
+)
+from connector.runtimes.codex.domain.input_requests import CODEX_REQUEST_USER_INPUT
 from connector.runtimes.codex.runtime_helpers import soft_codex_unavailable_reason
 from connector.runtimes.codex.sdk.binary import (
     codex_launch_command,
@@ -55,8 +62,8 @@ from connector.runtimes.codex.sdk.runtime_client import (
     CodexThreadListResult,
     CodexThreadReadResult,
     CodexThreadResult,
-    CodexThreadTurnsResult,
     CodexThreadTurnsPage,
+    CodexThreadTurnsResult,
     CodexTurnResult,
     NotificationHandler,
 )
@@ -85,7 +92,28 @@ CODEX_SDK_APPROVAL_REQUEST_METHODS = {
     "item/fileChange/requestApproval",
     "item/permissions/requestApproval",
 }
+CODEX_SDK_INPUT_REQUEST_METHODS = {CODEX_REQUEST_USER_INPUT}
 CODEX_THREAD_TURNS_PAGE_SIZE = 100
+ReadResultT = TypeVar("ReadResultT")
+
+
+@dataclass(frozen=True, slots=True)
+class PendingServerRequest:
+    kind: Literal["approval", "input"]
+    response: asyncio.Future[Mapping[str, Any]]
+
+    def cancel(self) -> None:
+        if not self.response.done():
+            self.response.set_result(
+                {"answers": {}} if self.kind == "input" else {"decision": "decline"}
+            )
+
+
+@dataclass(slots=True)
+class TurnStreamState:
+    thread_id: str
+    turn_id: str
+    terminal_delivery: asyncio.Task[None] | None = None
 
 
 class CodexThreadTurnsListResponse(BaseModel):
@@ -113,36 +141,51 @@ class CodexSdkClient:
         client: Any,
         sdk: Any | None = None,
         model_gateway: ModelGateway | None = None,
+        client_factory: Callable[[], Any] | None = None,
     ) -> None:
         self._client = client
         self._sdk = sdk
         self._model_gateway = model_gateway
+        self._client_factory = client_factory
+        self._recovery_lock = asyncio.Lock()
+        self._started = False
         self._handler: NotificationHandler | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._pending_approval_responses: dict[
-            str, asyncio.Future[Mapping[str, Any]]
-        ] = {}
+        # Responses for blocking Codex server requests. Approvals and
+        # `request_user_input` questionnaires share this pending map.
+        self._pending_approval_responses: dict[str, PendingServerRequest] = {}
         self._entered_client: Any | None = None
         self._threads: dict[str, Any] = {}
         self._loaded_thread_ids: set[str] = set()
         self._turns: dict[str, Any] = {}
         self._stream_tasks: dict[str, asyncio.Task[None]] = {}
+        self._stream_states: dict[str, TurnStreamState] = {}
         self._global_notification_task: asyncio.Task[None] | None = None
 
     async def start(self, handler: NotificationHandler) -> None:
         self._handler = handler
         self._loop = asyncio.get_running_loop()
-        if install_deferred_server_request_reader(self._client):
-            logger.debug("codex sdk deferred server request reader installed")
-        install_codex_approval_handler(self._client, self.handle_sdk_approval_request)
-        start = getattr(self._client, "start", None)
-        if callable(start):
-            await maybe_await(call_with_optional_handler(start, handler))
-        elif hasattr(self._client, "__aenter__"):
-            self._entered_client = await self._client.__aenter__()
+        await self.start_native_client(self._client)
+        self._started = True
         self.start_global_notification_task()
 
+    async def start_native_client(self, client: Any) -> None:
+        if install_deferred_server_request_reader(client):
+            logger.debug("codex sdk deferred server request reader installed")
+        install_codex_approval_handler(client, self.handle_sdk_approval_request)
+        start = getattr(client, "start", None)
+        if callable(start):
+            await maybe_await(call_with_optional_handler(start, self._handler))
+        elif hasattr(client, "__aenter__"):
+            self._entered_client = await client.__aenter__()
+
     async def stop(self) -> None:
+        self._started = False
+        await self.cancel_background_tasks()
+        await self.stop_native_client(self._client)
+
+    async def cancel_background_tasks(self, *, transport_failed: bool = False) -> None:
+        interrupted_streams = tuple(self._stream_states.values())
         self.cancel_pending_approval_responses()
         if self._global_notification_task is not None:
             self._global_notification_task.cancel()
@@ -156,21 +199,102 @@ class CodexSdkClient:
         if self._stream_tasks:
             await asyncio.gather(*self._stream_tasks.values(), return_exceptions=True)
             self._stream_tasks.clear()
-        stop = getattr(self._client, "stop", None)
+        for stream in interrupted_streams:
+            if stream.terminal_delivery is None and transport_failed:
+                # Only a turn without a terminal owner needs a synthetic failure.
+                # An in-flight terminal must finish its notices and state first.
+                self._start_terminal_delivery(
+                    stream,
+                    {
+                        "method": "turn/failed",
+                        "params": {
+                            "threadId": stream.thread_id,
+                            "turnId": stream.turn_id,
+                            "error": {
+                                "code": "codex_transport_closed",
+                                "message": "Codex connection closed while this turn was active.",
+                            },
+                            "metadata": {"source": "codex.sdk.transport.recovery"},
+                        },
+                    },
+                )
+            await self._finish_terminal_delivery(stream)
+        self._stream_states.clear()
+        self._threads.clear()
+        self._loaded_thread_ids.clear()
+        self._turns.clear()
+
+    async def stop_native_client(self, client: Any) -> None:
+        stop = getattr(client, "stop", None)
         if callable(stop):
             await maybe_await(stop())
-        elif self._entered_client is not None and hasattr(self._client, "__aexit__"):
-            await self._client.__aexit__(None, None, None)
+        elif self._entered_client is not None and hasattr(client, "__aexit__"):
+            await client.__aexit__(None, None, None)
             self._entered_client = None
-        elif hasattr(self._client, "close"):
-            await maybe_await(self._client.close())
+        elif hasattr(client, "close"):
+            await maybe_await(client.close())
+
+    async def call_read_with_recovery(
+        self,
+        operation: str,
+        action: Callable[[Any], Awaitable[ReadResultT]],
+    ) -> ReadResultT:
+        failed_client = self._client
+        try:
+            return await action(failed_client)
+        except Exception as exc:
+            if not is_codex_transport_closed_error(exc):
+                raise
+            await self.recover_transport(
+                operation=operation,
+                failed_client=failed_client,
+                error=exc,
+            )
+        return await action(self._client)
+
+    async def recover_transport(
+        self,
+        *,
+        operation: str,
+        failed_client: Any,
+        error: Exception,
+    ) -> None:
+        if self._client_factory is None:
+            raise error
+        async with self._recovery_lock:
+            if self._client is not failed_client:
+                return
+            logger.warning(
+                "codex sdk transport closed; recreating app-server "
+                "operation={} error_type={}",
+                operation,
+                type(error).__name__,
+            )
+            await self.cancel_background_tasks(transport_failed=True)
+            try:
+                await self.stop_native_client(failed_client)
+            except Exception as stop_error:  # noqa: BLE001
+                logger.debug(
+                    "codex sdk failed client cleanup skipped error_type={}",
+                    type(stop_error).__name__,
+                )
+            replacement = self._client_factory()
+            self._client = replacement
+            self._entered_client = None
+            if self._started:
+                await self.start_native_client(replacement)
+                self.start_global_notification_task()
+            logger.info(
+                "codex sdk transport recovered operation={} error_type={}",
+                operation,
+                type(error).__name__,
+            )
 
     def cancel_pending_approval_responses(self) -> None:
         pending = tuple(self._pending_approval_responses.values())
         self._pending_approval_responses.clear()
-        for response in pending:
-            if not response.done():
-                response.set_result({"decision": "decline"})
+        for request in pending:
+            request.cancel()
 
     def start_global_notification_task(self) -> None:
         """Forward SDK global notifications to the runtime projector.
@@ -208,12 +332,15 @@ class CodexSdkClient:
             await self._emit(notification)
 
     async def list_models(self) -> CodexModelListResult:
-        models = getattr(self._client, "models", None)
-        if not callable(models):
-            raise RuntimeInvalidRequestError(
-                "Codex SDK client does not expose models()"
-            )
-        result = await models(include_hidden=False)
+        async def read_models(client: Any) -> Any:
+            models = getattr(client, "models", None)
+            if not callable(models):
+                raise RuntimeInvalidRequestError(
+                    "Codex SDK client does not expose models()"
+                )
+            return await models(include_hidden=False)
+
+        result = await self.call_read_with_recovery("model/list", read_models)
         return model_list_result(result)
 
     async def list_threads(
@@ -222,11 +349,6 @@ class CodexSdkClient:
         cursor: str | None = None,
         archived: bool | None = None,
     ) -> CodexThreadListResult:
-        thread_list = getattr(self._client, "thread_list", None)
-        if not callable(thread_list):
-            raise RuntimeInvalidRequestError(
-                "Codex SDK client does not expose thread_list()"
-            )
         params: dict[str, Any] = {
             "cursor": cursor,
             "limit": limit,
@@ -236,7 +358,16 @@ class CodexSdkClient:
         }
         if archived is not None:
             params["archived"] = archived
-        result = await thread_list(**params)
+
+        async def read_threads(client: Any) -> Any:
+            thread_list = getattr(client, "thread_list", None)
+            if not callable(thread_list):
+                raise RuntimeInvalidRequestError(
+                    "Codex SDK client does not expose thread_list()"
+                )
+            return await thread_list(**params)
+
+        result = await self.call_read_with_recovery("thread/list", read_threads)
         return thread_list_result(result)
 
     async def read_thread(
@@ -245,20 +376,23 @@ class CodexSdkClient:
         include_turns: bool = True,
     ) -> CodexThreadReadResult:
         started_at = time.monotonic()
-        low_level_client = getattr(self._client, "_client", None)
-        request = getattr(low_level_client, "request", None)
-        if callable(request):
-            await ensure_codex_initialized(self._client)
-            result = await request(
-                "thread/read",
-                {"threadId": thread_id, "includeTurns": include_turns},
-                response_model=CodexRawThreadReadResponse,
-            )
-            projected = CodexThreadReadResult(thread=result.thread)
-        else:
+
+        async def read(client: Any) -> CodexThreadReadResult:
+            low_level_client = getattr(client, "_client", None)
+            request = getattr(low_level_client, "request", None)
+            if callable(request):
+                await ensure_codex_initialized(client)
+                result = await request(
+                    "thread/read",
+                    {"threadId": thread_id, "includeTurns": include_turns},
+                    response_model=CodexRawThreadReadResponse,
+                )
+                return CodexThreadReadResult(thread=result.thread)
             thread = self._thread_handle(thread_id)
             result = await thread.read(include_turns=include_turns)
-            projected = thread_read_result(result)
+            return thread_read_result(result)
+
+        projected = await self.call_read_with_recovery("thread/read", read)
         elapsed_ms = (time.monotonic() - started_at) * 1000
         if include_turns or elapsed_ms >= 250:
             logger.info(
@@ -286,14 +420,12 @@ class CodexSdkClient:
         turns_descending.reverse()
         return CodexThreadTurnsResult(turns=tuple(turns_descending))
 
-    async def list_thread_turns_page(self, thread_id: str, cursor: str | None = None, limit: int = 20) -> CodexThreadTurnsPage:
-        await ensure_codex_initialized(self._client)
-        low_level_client = getattr(self._client, "_client", None)
-        request = getattr(low_level_client, "request", None)
-        if not callable(request):
-            raise RuntimeInvalidRequestError(
-                "Codex SDK client does not expose raw request() for thread turns"
-            )
+    async def list_thread_turns_page(
+        self,
+        thread_id: str,
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> CodexThreadTurnsPage:
         params: dict[str, Any] = {
             "threadId": thread_id,
             "limit": limit,
@@ -302,16 +434,30 @@ class CodexSdkClient:
         }
         if cursor is not None:
             params["cursor"] = cursor
-        try:
-            page = await request(
-                "thread/turns/list",
-                params,
-                response_model=CodexThreadTurnsListResponse,
-            )
-        except MethodNotFoundError as exc:
-            raise RuntimeInvalidRequestError(
-                "Codex app-server does not support thread/turns/list"
-            ) from exc
+
+        async def read_page(client: Any) -> Any:
+            await ensure_codex_initialized(client)
+            low_level_client = getattr(client, "_client", None)
+            request = getattr(low_level_client, "request", None)
+            if not callable(request):
+                raise RuntimeInvalidRequestError(
+                    "Codex SDK client does not expose raw request() for thread turns"
+                )
+            try:
+                return await request(
+                    "thread/turns/list",
+                    params,
+                    response_model=CodexThreadTurnsListResponse,
+                )
+            except MethodNotFoundError as exc:
+                raise RuntimeInvalidRequestError(
+                    "Codex app-server does not support thread/turns/list"
+                ) from exc
+
+        page = await self.call_read_with_recovery(
+            "thread/turns/list",
+            read_page,
+        )
         return CodexThreadTurnsPage(turns=tuple(page.data), next_cursor=page.next_cursor)
 
     async def start_thread(self, request: CodexStartThreadRequest) -> CodexThreadResult:
@@ -558,10 +704,10 @@ class CodexSdkClient:
     ) -> None:
         response_payload = dict(result or {})
         request_key = str(request_id)
-        approval_response = self._pending_approval_responses.pop(request_key, None)
-        if approval_response is not None:
-            if not approval_response.done():
-                approval_response.set_result(response_payload)
+        pending_request = self._pending_approval_responses.pop(request_key, None)
+        if pending_request is not None:
+            if not pending_request.response.done():
+                pending_request.response.set_result(response_payload)
             logger.info(
                 "codex sdk approval response delivered request_id={} pending_hit=true payload_keys={}",
                 request_key,
@@ -586,6 +732,8 @@ class CodexSdkClient:
         method: str,
         params: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
+        if method in CODEX_SDK_INPUT_REQUEST_METHODS:
+            return self.handle_sdk_input_request(method, dict(params or {}))
         if method not in CODEX_SDK_APPROVAL_REQUEST_METHODS:
             return {}
         loop = self._loop
@@ -623,7 +771,9 @@ class CodexSdkClient:
             return {"decision": "decline"}
         request_id = sdk_approval_request_id(method, params)
         response: asyncio.Future[Mapping[str, Any]] = asyncio.Future()
-        self._pending_approval_responses[request_id] = response
+        self._pending_approval_responses[request_id] = PendingServerRequest(
+            kind="approval", response=response
+        )
         logger.info(
             "codex sdk approval request registered method={} request_id={} approval_id={} thread_id={} turn_id={} item_id={}",
             method,
@@ -647,6 +797,86 @@ class CodexSdkClient:
             self._pending_approval_responses.pop(request_id, None)
             logger.debug(
                 "codex sdk approval request unregistered request_id={} pending_count={}",
+                request_id,
+                len(self._pending_approval_responses),
+            )
+
+    def handle_sdk_input_request(
+        self,
+        method: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Answer one Codex `request_user_input` request with the user's answers.
+
+        Runs on the SDK server-request reader thread. The runtime loop publishes
+        the questionnaire notice and resolves the returned future once the user
+        answers through `interaction.respond`.
+        """
+
+        loop = self._loop
+        if loop is None:
+            logger.warning(
+                "codex sdk input request answered empty because runtime loop is unavailable method={} thread_id={} turn_id={}",
+                method,
+                params.get("threadId") or params.get("thread_id"),
+                params.get("turnId") or params.get("turn_id"),
+            )
+            return {"answers": {}}
+        started_at = time.monotonic()
+        future = asyncio.run_coroutine_threadsafe(
+            self.publish_sdk_input_request(method, params),
+            loop,
+        )
+        response = dict(future.result())
+        elapsed_ms = (time.monotonic() - started_at) * 1000
+        logger.info(
+            "codex sdk input request completed method={} elapsed_ms={:.1f} answer_count={}",
+            method,
+            elapsed_ms,
+            len(response.get("answers") or {}),
+        )
+        return response
+
+    async def publish_sdk_input_request(
+        self,
+        method: str,
+        params: dict[str, Any],
+    ) -> Mapping[str, Any]:
+        if self._handler is None:
+            logger.warning(
+                "codex sdk input request answered empty because notification handler is unavailable method={}",
+                method,
+            )
+            return {"answers": {}}
+        request_id = sdk_input_request_id(method, params)
+        response: asyncio.Future[Mapping[str, Any]] = asyncio.Future()
+        self._pending_approval_responses[request_id] = PendingServerRequest(
+            kind="input", response=response
+        )
+        logger.info(
+            "codex sdk input request registered method={} request_id={} thread_id={} turn_id={} item_id={} question_count={} is_blocking={}",
+            method,
+            request_id,
+            params.get("threadId") or params.get("thread_id"),
+            params.get("turnId") or params.get("turn_id"),
+            params.get("itemId") or params.get("item_id"),
+            len(params.get("questions") or []),
+            params.get("isBlocking"),
+        )
+        try:
+            await self._handler(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": params,
+                }
+            )
+            return await response
+        finally:
+            self._pending_approval_responses.pop(request_id, None)
+            logger.debug(
+                "codex sdk input request unregistered request_id={} pending_count={}",
                 request_id,
                 len(self._pending_approval_responses),
             )
@@ -697,11 +927,34 @@ class CodexSdkClient:
         old_task = self._stream_tasks.pop(turn_id, None)
         if old_task is not None:
             old_task.cancel()
-        self._stream_tasks[turn_id] = asyncio.create_task(
-            self._stream_turn(thread_id, turn_id, turn)
+        stream_state = TurnStreamState(thread_id=thread_id, turn_id=turn_id)
+        self._stream_states[turn_id] = stream_state
+        task = asyncio.create_task(
+            self._stream_turn(thread_id, turn_id, turn, stream_state=stream_state)
         )
+        self._stream_tasks[turn_id] = task
+        task.add_done_callback(self.handle_stream_task_done)
 
-    async def _stream_turn(self, thread_id: str, turn_id: str, turn: Any) -> None:
+    def handle_stream_task_done(self, task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.debug("codex sdk turn stream task cancelled")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "codex sdk turn stream task failed error_type={}",
+                type(exc).__name__,
+            )
+
+    async def _stream_turn(
+        self,
+        thread_id: str,
+        turn_id: str,
+        turn: Any,
+        *,
+        stream_state: TurnStreamState | None = None,
+    ) -> None:
+        stream_state = stream_state or TurnStreamState(thread_id, turn_id)
         completed_seen = False
         cancelled = False
         try:
@@ -711,37 +964,84 @@ class CodexSdkClient:
                     thread_id=thread_id,
                     turn_id=turn_id,
                 )
-                if message.event_type in {
+                is_terminal = message.event_type in {
                     "turn/completed",
                     "turn/failed",
                     "turn/interrupted",
                     "turn/cancelled",
-                }:
+                }
+                if is_terminal:
                     completed_seen = True
-                await self._emit(message)
+                    delivery = self._start_terminal_delivery(stream_state, message)
+                    await asyncio.shield(delivery)
+                else:
+                    await self._emit(message)
         except asyncio.CancelledError:
             cancelled = True
             raise
         finally:
-            if not completed_seen and not cancelled:
-                await self._emit(
-                    {
-                        "method": "turn/failed",
-                        "params": {
-                            "threadId": thread_id,
-                            "turnId": turn_id,
-                            "error": {
-                                "code": "codex_stream_ended_without_terminal_event",
-                                "message": "Codex stream ended without a terminal turn event.",
+            try:
+                if not completed_seen and not cancelled:
+                    self._start_terminal_delivery(
+                        stream_state,
+                        {
+                            "method": "turn/failed",
+                            "params": {
+                                "threadId": thread_id,
+                                "turnId": turn_id,
+                                "error": {
+                                    "code": "codex_stream_ended_without_terminal_event",
+                                    "message": "Codex stream ended without a terminal turn event.",
+                                },
+                                "metadata": {"source": "codex.sdk.stream.exhausted"},
                             },
-                            "metadata": {"source": "codex.sdk.stream.exhausted"},
                         },
-                    }
-                )
-            self._stream_tasks.pop(turn_id, None)
-            self._turns.pop(turn_id, None)
-            if self._turns.get(thread_id) is turn:
-                self._turns.pop(thread_id, None)
+                    )
+                await self._finish_terminal_delivery(stream_state)
+            finally:
+                if self._stream_tasks.get(turn_id) is asyncio.current_task():
+                    self._stream_tasks.pop(turn_id, None)
+                if self._stream_states.get(turn_id) is stream_state:
+                    self._stream_states.pop(turn_id, None)
+                if self._turns.get(turn_id) is turn:
+                    self._turns.pop(turn_id, None)
+                if self._turns.get(thread_id) is turn:
+                    self._turns.pop(thread_id, None)
+
+    def _start_terminal_delivery(
+        self, stream: TurnStreamState, message: CodexNotificationMessage
+    ) -> asyncio.Task[None]:
+        if stream.terminal_delivery is None:
+            # The projector performs several awaited host writes. Give the whole
+            # terminal one owner so stream cancellation cannot interrupt it.
+            stream.terminal_delivery = asyncio.create_task(self._emit(message))
+        return stream.terminal_delivery
+
+    async def _finish_terminal_delivery(self, stream: TurnStreamState) -> None:
+        delivery = stream.terminal_delivery
+        if delivery is None:
+            return
+        cancelled = False
+        while not delivery.done():
+            try:
+                await asyncio.shield(delivery)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception:  # noqa: BLE001
+                break
+        try:
+            delivery.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "codex terminal delivery failed thread_id={} turn_id={} error_type={}",
+                stream.thread_id,
+                stream.turn_id,
+                type(exc).__name__,
+            )
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def _emit(self, message: CodexNotificationMessage) -> None:
         if self._handler is not None:
@@ -750,13 +1050,38 @@ class CodexSdkClient:
 
 def sdk_client_from_config(config: RuntimeConfig) -> CodexRuntimeClient:
     sdk = _load_codex_sdk()
-    client = _create_sdk_client(sdk, config)
+
+    def create_client() -> Any:
+        return _create_sdk_client(sdk, config)
+
+    client = create_client()
     model_gateway = model_gateway_from_config(config.values.get("modelGateway"))
     return CodexSdkClient(
         client,
         sdk=sdk,
         model_gateway=model_gateway,
+        client_factory=create_client,
     )
+
+
+def is_codex_transport_closed_error(error: BaseException) -> bool:
+    current: BaseException | None = error
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, (ConnectionError, EOFError, TransportClosedError)):
+            return True
+        if isinstance(current, OSError) and current.errno in {
+            errno.EBADF,
+            errno.ECONNABORTED,
+            errno.ECONNRESET,
+            errno.EPIPE,
+        }:
+            return True
+        if isinstance(current, ValueError) and "closed file" in str(current).lower():
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _load_codex_sdk() -> Any:
@@ -869,6 +1194,17 @@ def install_codex_approval_handler(client: Any, handler: Any) -> bool:
         client._approval_handler = handler
         return True
     return False
+
+
+def sdk_input_request_id(method: str, params: Mapping[str, Any]) -> str:
+    stable_parts = [
+        method,
+        str(params.get("threadId") or params.get("thread_id") or ""),
+        str(params.get("turnId") or params.get("turn_id") or ""),
+        str(params.get("itemId") or params.get("item_id") or ""),
+    ]
+    digest = hashlib.sha256(":".join(stable_parts).encode()).hexdigest()[:24]
+    return f"input_{digest}"
 
 
 def sdk_approval_request_id(method: str, params: Mapping[str, Any]) -> str:

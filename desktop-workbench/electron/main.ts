@@ -38,6 +38,7 @@ import { validateTitleBarColors } from "./title-bar";
 import type { BackendInit } from "./backend/protocol";
 import { DesktopBackendClient } from "./backend-client";
 import { windowMaterialOptions } from "./window-material";
+import buildInfo from "../build-info.json";
 import config from "../config.json";
 import { proxyDesktopApi } from "./api-proxy";
 import {
@@ -962,6 +963,7 @@ if (hasSingleInstanceLock) {
     updates = new DesktopUpdateService({
       directory: path.join(app.getPath("userData"), "updates"),
       currentVersion: app.getVersion(),
+      serverVersion: buildInfo.serverVersion,
       downloadUrl: config.updates.downloadUrl,
       platform: process.platform,
       healthTimeoutMs: config.healthTimeoutMs,

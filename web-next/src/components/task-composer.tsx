@@ -14,7 +14,10 @@ import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -81,6 +84,9 @@ import {
   type NewSessionSelectionPreference,
 } from "@/features/dashboard/new-session-preferences"
 import { watchNewSessionRuntimeInventory } from "@/features/dashboard/new-session-runtime-inventory"
+import { dshAgentPresetLabel, dshAgentPresetOptions, dshNewSessionAgentPreset } from "@/features/dashboard/dsh-agent-presets"
+import { useDshAgentPresets } from "@/features/dashboard/use-dsh-agent-presets"
+import { migrateDshSessionPreset, rememberDshSessionPreset } from "@/features/dashboard/dsh-session-presets"
 
 const NEW_SESSION_PREFERENCE_KEY = "aa-new-session-preference-v1"
 const TITLE_WRITE_MS = 58
@@ -173,6 +179,7 @@ export function TaskComposer() {
     updateProject,
   } = useWorkspace()
   const t = useTranslations("dashboard.new")
+  const tPreset = useTranslations("dashboard.agentPresets")
   const typewriterTitles = React.useMemo(
     () => {
       const keys = isMobile ? MOBILE_NEW_SESSION_TITLE_KEYS : NEW_SESSION_TITLE_KEYS
@@ -270,9 +277,13 @@ export function TaskComposer() {
   const selectedRuntimeScope = selectedRuntime
     ? { runtimeId: selectedRuntime.runtimeId, runtimeType: selectedRuntime.runtimeType }
     : undefined
+  const { runtime: agentPresetRuntime, loading: agentPresetsLoading, error: agentPresetsError } = useDshAgentPresets(
+    authSession?.accessToken, selectedConnectorId, selectedAgent, selectedRuntime?.runtimeType === "dsh",
+  )
   const [selectedModel, setSelectedModel] = React.useState("")
   const [selectedReasoning, setSelectedReasoning] = React.useState("")
   const [selectedPermissionMode, setSelectedPermissionMode] = React.useState("")
+  const [agentPresetSelections, setAgentPresetSelections] = React.useState<Record<string, string>>({})
   const [permissionRefreshKey, setPermissionRefreshKey] = React.useState(0)
   const [workspace, setWorkspace] = React.useState<WorkspaceSelection | null>(null)
   const [projectEditor, setProjectEditor] = React.useState<ProjectEditorState>(null)
@@ -639,6 +650,15 @@ export function TaskComposer() {
   const permissionDrawerItems = permissionOptions
   const selectedModelSelection = selectionIdForModelCatalog(modelCatalog, selectedModel, selectedReasoning)
   const selectedPermissionSelection = selectionIdForPermissionCatalog(permissionCatalog, selectedPermissionMode)
+  const agentPresetScope = newSessionSelectionScope(selectedConnectorId, selectedAgent)
+  const presetRuntime = agentPresetRuntime ?? selectedRuntime
+  const agentPresetOptions = dshAgentPresetOptions(presetRuntime)
+  const selectedAgentPreset = dshNewSessionAgentPreset(
+    presetRuntime, agentPresetOptions, agentPresetSelections[agentPresetScope],
+  )
+  const agentPresetLabel = selectedAgentPreset
+    ? dshAgentPresetLabel(selectedAgentPreset, agentPresetOptions, tPreset)
+    : tPreset(agentPresetsLoading ? "loading" : "unavailable")
 
   const handleDeviceChange = React.useCallback((connectorId: string) => {
     const targetOptions = activeRuntimes(runtimeInventory[connectorId])
@@ -697,14 +717,17 @@ export function TaskComposer() {
 
   const requiresModelSelection = canUseModelCatalog && models.length > 0
   const requiresPermissionSelection = canUsePermissionCatalog && permissionOptions.length > 0
+  const requiresAgentPresetSelection = selectedRuntime?.runtimeType === "dsh" && agentPresetOptions.length > 0
   const hasSelectionSettings = models.length > 0 || permissionOptions.length > 0
   const canCreate =
     Boolean(authSession?.accessToken && selectedConnector && selectedRuntime && workspace?.path) &&
     workspace?.connectorId === selectedConnectorId &&
     !creating &&
     !catalogsLoading &&
+    !agentPresetsLoading &&
     (!requiresModelSelection || Boolean(selectedModelSelection)) &&
     (!requiresPermissionSelection || Boolean(selectedPermissionSelection)) &&
+    (!requiresAgentPresetSelection || Boolean(selectedAgentPreset)) &&
     (attachments.length === 0 || canUseAttachments) && attachmentsAllowed &&
     (prompt.trim().length > 0 || attachments.length > 0)
   const selectorsLoading =
@@ -719,8 +742,10 @@ export function TaskComposer() {
     if (workspace.connectorId !== selectedConnector.id) return
     if (!prompt.trim() && attachments.length === 0) return
     if (catalogsLoading) return
+    if (agentPresetsLoading) return
     if (requiresModelSelection && !selectedModelSelection) return
     if (requiresPermissionSelection && !selectedPermissionSelection) return
+    if (requiresAgentPresetSelection && !selectedAgentPreset) return
     if (attachments.length > 0 && (!canUseAttachments || !attachmentsAllowed)) return
     creatingRef.current = true
     setCreating(true)
@@ -782,10 +807,18 @@ export function TaskComposer() {
       },
       statusReason: null,
       error: null,
-      metadata: {},
+      metadata: selectedAgentPreset ? { agentPreset: selectedAgentPreset } : {},
       updatedSeq: 1,
       createdAt: now,
       updatedAt: now,
+    }
+    if (selectedRuntime.runtimeType === "dsh" && selectedAgentPreset) {
+      rememberDshSessionPreset(
+        authSession.userId,
+        optimisticSession,
+        selectedAgentPreset,
+        agentPresetOptions.find((option) => option.id === selectedAgentPreset)?.label,
+      )
     }
     addOptimisticMessage({
       clientMessageId,
@@ -821,7 +854,7 @@ export function TaskComposer() {
         cwd: project.workspacePath,
         ...(selectedRuntime?.runtimeType === "dsh" ? {
           runtimeOptions: {
-            agentPreset: selectedRuntime.config?.defaultAgentPreset ?? selectedRuntime.defaults?.defaultAgentPreset,
+            agentPreset: selectedAgentPreset,
           },
         } : {}),
       }
@@ -845,6 +878,7 @@ export function TaskComposer() {
         clientMessageId,
       })
       toolSidebarStore.migrateSession(localSessionId, created.session.id)
+      migrateDshSessionPreset(authSession.userId, optimisticSession, created.session)
       bindOptimisticSession(localSessionId, created.session, created.attachments)
     } catch (err) {
       const message = err instanceof Error ? err.message : t("createFailed")
@@ -1103,15 +1137,52 @@ export function TaskComposer() {
           </div>
         </div>
 
-        <div className="mt-3">
-          <WorkspacePicker
-            connectorId={selectedConnectorId}
-            value={workspace}
-            onChange={setWorkspace}
-            includeProjects={!sidebarShowsSessions}
-            disabled={creating}
-            onCreateProject={() => setProjectEditor({ mode: "create" })}
-          />
+        <div className="mt-3 flex min-w-0 flex-wrap items-center gap-2">
+          <div className="min-w-0 max-w-full">
+            <WorkspacePicker
+              connectorId={selectedConnectorId}
+              value={workspace}
+              onChange={setWorkspace}
+              includeProjects={!sidebarShowsSessions}
+              disabled={creating}
+              onCreateProject={() => setProjectEditor({ mode: "create" })}
+            />
+          </div>
+          {selectedRuntime?.runtimeType === "dsh" ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="max-w-full shrink-0 gap-1.5"
+                  aria-label={`${tPreset("label")}: ${agentPresetLabel}`}
+                  title={agentPresetsError ?? tPreset("label")}
+                  disabled={creating || agentPresetsLoading || !agentPresetOptions.some((option) => option.enabled)}
+                >
+                  <span className="max-w-40 truncate">{agentPresetLabel}</span>
+                  {agentPresetsLoading ? <Spinner data-icon="inline-end" /> : <ChevronDown data-icon="inline-end" />}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-40">
+                <DropdownMenuGroup>
+                  <DropdownMenuRadioGroup
+                    value={selectedAgentPreset ?? ""}
+                    onValueChange={(id) => {
+                      if (!agentPresetOptions.some((option) => option.id === id && option.enabled)) return
+                      setAgentPresetSelections((current) => ({ ...current, [agentPresetScope]: id }))
+                    }}
+                  >
+                    {agentPresetOptions.map((option) => (
+                      <DropdownMenuRadioItem key={option.id} value={option.id} disabled={!option.enabled}>
+                        <span className="min-w-0 flex-1 truncate">{dshAgentPresetLabel(option.id, agentPresetOptions, tPreset)}</span>
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
         </div>
       </div>
 

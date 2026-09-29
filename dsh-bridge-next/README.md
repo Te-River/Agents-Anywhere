@@ -31,7 +31,7 @@ dsh plugin --profile desktop add @agents-anywhere/dsh-bridge-next
 
 安装完成后重启对应的 DSH 实例，从左侧边栏打开“远程控制”，按提示登录并连接。若你的 Profile 不是 `desktop`，请替换命令中的 Profile 名称。
 
-安装命令不锁定插件版本，会获取 npm 当前的默认发布版本。插件包与 DSH 的兼容范围请以所安装版本的 `peerDependencies` 为准；较新的 DSH 不代表旧插件包自动兼容。当前仓库源码以 DSH `0.1.7-rc.2` 为适配基线，并面向后续兼容版本；DSH Desktop 使用与自身版本配套的内置构建，不能简单等同于 npm 上的包。需要固定可复现的部署时，再在包名后添加经过验证的版本号。
+安装命令不锁定插件版本，会获取 npm 当前的默认发布版本。插件包与 DSH 的兼容范围请以所安装版本的 `peerDependencies` 为准；较新的 DSH 不代表旧插件包自动兼容。当前仓库源码以 DSH `0.2.0-rc.1` 为适配基线；DSH Desktop 使用与自身版本配套的内置构建，不能简单等同于 npm 上的包。需要固定可复现的部署时，再在包名后添加经过验证的版本号。
 
 ## 确认 DSH 已接入
 

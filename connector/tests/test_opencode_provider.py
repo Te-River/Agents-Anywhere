@@ -297,3 +297,48 @@ def test_discovery_marks_partial_without_a_location(tmp_path: Path) -> None:
     discovery_row = next(row for row in rows if row["capabilityId"] == "session.discovery")
     assert discovery_row["metadata"]["discoveryState"] == "partial"
     assert discovery_row["available"] is False
+
+
+# ------------------------------------------------- the four review findings
+#
+# Every discovery test above injects `service_reader`, which is exactly how
+# "discovery ignores stateDir" stayed invisible: the injected reader bypasses
+# the path the config names. These tests go through the real default path.
+
+
+def test_discovery_reads_the_registration_from_the_configured_state_dir(tmp_path: Path) -> None:
+    # A custom stateDir is the documented way to point at another OpenCode's
+    # registration; discovery must read it from there, not from ~/.local/state.
+    service(tmp_path)
+    factory = client_returning(tmp_path, {"version": "2.0.18", "pid": 18772, "urls": [], "paths": {"tmp": "T"}})
+
+    result = asyncio.run(
+        serve_discovery.discover({"stateDir": str(tmp_path), "location": DIRECTORY}, client_factory=factory)
+    )
+    assert result.available is True, result.reason
+    assert result.metadata["servicePid"] == 18772
+
+
+def test_registry_dir_always_points_at_the_opencode_subdirectory(tmp_path: Path) -> None:
+    # `stateDir` is the XDG state home: both branches must append `opencode`,
+    # or a configured value silently means something different from the default.
+    configured = provider_config.registry_dir({"stateDir": str(tmp_path)})
+    default = provider_config.registry_dir({})
+    assert configured == Path(canonical_path(tmp_path / "opencode"))
+    assert default.name == "opencode"
+
+
+def test_a_pinned_service_pid_that_does_not_match_is_refused(tmp_path: Path) -> None:
+    # The pin exists so one instance drives one OpenCode process. Reading whoever
+    # happens to be registered turns the pin into decoration.
+    service(tmp_path)
+    factory = client_returning(tmp_path, {"version": "2.0.18", "pid": 18772, "urls": [], "paths": {"tmp": "T"}})
+
+    result = asyncio.run(
+        serve_discovery.discover(
+            {"stateDir": str(tmp_path), "servicePid": 99999, "location": DIRECTORY}, client_factory=factory
+        )
+    )
+    assert result.available is False
+    assert "99999" in (result.reason or "") and "18772" in (result.reason or "")
+    assert result.metadata["pinnedPid"] == 99999 and result.metadata["registeredPid"] == 18772

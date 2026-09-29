@@ -23,12 +23,14 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.agentsanywhere.app.api.ApiClient
+import com.agentsanywhere.app.api.AnnouncementsApi
 import com.agentsanywhere.app.api.AuthApi
 import com.agentsanywhere.app.api.DevicesApi
 import com.agentsanywhere.app.api.FilesApi
 import com.agentsanywhere.app.api.RealtimeApi
 import com.agentsanywhere.app.api.SessionsApi
 import com.agentsanywhere.app.api.TerminalApi
+import com.agentsanywhere.app.config.AppConfig
 import com.agentsanywhere.app.feature.auth.AuthController
 import com.agentsanywhere.app.feature.auth.AuthSessionStore
 import com.agentsanywhere.app.feature.auth.WebLoginState
@@ -69,6 +71,8 @@ import com.agentsanywhere.app.navigation.AppDestination
 import com.agentsanywhere.app.ui.designsystem.AgentsAnywhereTheme
 import com.agentsanywhere.app.ui.designsystem.AALanguageMode
 import com.agentsanywhere.app.ui.screens.home.HomeTab
+import com.agentsanywhere.app.ui.screens.announcements.AnnouncementGate
+import com.agentsanywhere.app.ui.screens.announcements.AnnouncementPage
 import com.agentsanywhere.app.ui.screens.update.AppUpdatePromptDialog
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -121,6 +125,7 @@ fun AgentsAnywhereApp(
         })
     }
     val realtimeApi = remember(apiClient) { RealtimeApi(client = apiClient) }
+    val announcementsApi = remember(apiClient) { AnnouncementsApi(apiClient) }
     val realtimeClientId = remember(context) { RealtimeClientIdStore(context).readOrCreate() }
     val authController = remember(context, sessionStore, apiClient) {
         AuthController(
@@ -860,6 +865,9 @@ fun AgentsAnywhereApp(
         onListNewSessionRuntimes = { connectorId ->
             sessionsController.listNewSessionRuntimes(connectorId)
         },
+        onDiscoverNewSessionRuntimes = { connectorId ->
+            devicesController.discoverDeviceRuntimes(connectorId)
+        },
         onLoadNewSessionRuntimeCapabilities = { connectorId, runtime ->
             sessionsController.loadNewSessionRuntimeCapabilities(connectorId, runtime)
         },
@@ -876,6 +884,20 @@ fun AgentsAnywhereApp(
             pendingMobileLoginQr = payload
             destinationName = AppDestination.QrWaiting.name
         },
+    )
+    AnnouncementGate(
+        api = announcementsApi,
+        serverUrl = updateServerUrl.ifBlank { AppConfig.OFFICIAL_SERVER_URL },
+        page = when {
+            currentDestination == AppDestination.LoginMethods -> AnnouncementPage.Login
+            updatesAllowed -> AnnouncementPage.App
+            else -> null
+        },
+        appVisible = appVisible,
+        blocked = updatesAllowed && (
+            appUpdateViewModel.state.checking || appUpdateViewModel.state.promptVisible ||
+                appUpdateViewModel.state.downloading || appUpdateViewModel.state.preparingInstall
+            ),
     )
     if (updatesAllowed) {
         AppUpdatePromptDialog(
