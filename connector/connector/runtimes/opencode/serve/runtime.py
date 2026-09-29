@@ -51,6 +51,10 @@ from connector.runtime_protocol import (
 )
 from connector.runtime_protocol.filesystem import canonical_path
 from connector.runtime_protocol.host import RuntimeHostClient
+from connector.runtimes.opencode.provider_config import (
+    DEFAULT_MAX_RESTART_ATTEMPTS,
+    DEFAULT_RESTART_BACKOFF_MS,
+)
 from connector.runtimes.opencode.serve import events, mappers
 from connector.runtimes.opencode.serve.client import (
     OpenCodeServerClient,
@@ -216,6 +220,10 @@ class OpenCodeServiceRuntime(AgentRuntime):
         self._service_reader = service_reader
         self._client_factory = client_factory or (lambda service: OpenCodeServerClient(service))
         self._client: OpenCodeServerClient | None = None
+        # The registration this client is actually attached to, so a re-read can
+        # tell whether the host re-registered under a new pid.
+        self._attached_service: OpenCodeService | None = None
+        self._restart_exhausted = False
         self._identity = RuntimeIdentity(RUNTIME, "unknown", "OpenCode", runtime_id=config.runtime_id)
         self._external_by_session: dict[str, str] = {}
         self._restart_task: asyncio.Task[None] | None = None
@@ -254,10 +262,18 @@ class OpenCodeServiceRuntime(AgentRuntime):
         value = self.config.values.get("location")
         return value if isinstance(value, str) and value else None
 
+    @property
+    def pinned_pid(self) -> int | None:
+        """The pid this instance must attach to, when the config names one."""
+        pid = self.config.values.get("servicePid")
+        return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+
     # --------------------------------------------------------------- lifecycle
 
     async def start(self) -> None:
         self._stopping = False
+        self._restart_exhausted = False
+        self._restart_task = None
         await self.host.runtime_health_update(
             "starting",
             {"code": "runtime_initializing", "message": "正在连接 OpenCode 服务…", "retryable": True},
@@ -294,6 +310,15 @@ class OpenCodeServiceRuntime(AgentRuntime):
         service = self._service_reader()
         if service is None:
             raise OpenCodeServiceUnavailable("no OpenCode service registration found")
+        pinned = self.pinned_pid
+        if pinned is not None and service.pid != pinned:
+            # A pin is a promise about *which* OpenCode this instance drives. The
+            # registration is shared per machine, so without this check two
+            # instances configured for different processes would both attach to
+            # whichever one registered last.
+            raise OpenCodeServiceUnavailable(
+                f"the registered OpenCode service is pid {service.pid}, not the pinned {pinned}"
+            )
         client = self._client_factory(service)
         try:
             info = await client.verify()
@@ -303,7 +328,9 @@ class OpenCodeServiceRuntime(AgentRuntime):
             raise
         old = self._client
         self._client = client
+        self._attached_service = service
         self._resolved_directory = directory
+        self._restart_exhausted = False
         if old is not None:
             await old.aclose()
         self._identity = RuntimeIdentity(
@@ -344,14 +371,26 @@ class OpenCodeServiceRuntime(AgentRuntime):
             )
         return None
 
+    def _max_attempts(self) -> int:
+        value = self.config.values.get("maxRestartAttempts")
+        if isinstance(value, int) and not isinstance(value, bool):
+            return max(0, value)
+        return DEFAULT_MAX_RESTART_ATTEMPTS
+
     def _schedule_restart(self) -> None:
-        if self._stopping or self._restart_task is not None:
+        if self._stopping or self._restart_task is not None or self._restart_exhausted:
+            return
+        attempts = self._max_attempts()
+        if attempts == 0:
+            # `0 or 3` used to turn an explicit "do not retry" into three retries,
+            # so the registration kept being re-read against a config that said
+            # otherwise. `start()` has already reported the failure; schedule nothing.
+            self._restart_exhausted = True
             return
 
         async def loop() -> None:
-            attempts = int(self.config.values.get("maxRestartAttempts") or 3)
-            backoff = float(self.config.values.get("restartBackoffMs") or 1000) / 1000.0
-            for _ in range(max(0, attempts)):
+            backoff = float(self.config.values.get("restartBackoffMs") or DEFAULT_RESTART_BACKOFF_MS) / 1000.0
+            for _ in range(attempts):
                 await asyncio.sleep(max(0.2, backoff))
                 if self._stopping:
                     return
@@ -363,6 +402,19 @@ class OpenCodeServiceRuntime(AgentRuntime):
                     await self.host.runtime_health_update("running")
                 self._start_events()
                 return
+            self._restart_exhausted = True
+            with suppress(Exception):
+                await self.host.runtime_health_update(
+                    "starting",
+                    {
+                        "code": "attach_attempts_exhausted",
+                        "message": (
+                            f"连接 OpenCode 服务已重试 {attempts} 次仍未成功，本实例停止重试；"
+                            "请打开 OpenCode 后重启该 runtime。"
+                        ),
+                        "retryable": True,
+                    },
+                )
 
         self._restart_task = asyncio.create_task(loop())
 
@@ -922,10 +974,23 @@ class OpenCodeServiceRuntime(AgentRuntime):
 
     async def _ensure_client(self) -> OpenCodeServerClient:
         if self._client is None:
+            if self._restart_exhausted:
+                raise OpenCodeServiceUnavailable(
+                    "attach attempts exhausted; restart this runtime to retry"
+                )
             await self._attach()
         client = self._client
         if client is None:
             raise OpenCodeServiceUnavailable("not attached to an OpenCode service")
+        if self._registration_moved():
+            # The host re-registers under a new pid and url when OpenCode restarts.
+            # Staying on the old client turned every later read into a connection
+            # failure against a process that no longer exists.
+            try:
+                await self._attach()
+            except OpenCodeServiceUnavailable:
+                raise
+            client = self._client or client
         if self.directory and self._resolved_directory is None:
             # The host opens and closes locations as it works, so a location that
             # happened to be closed at attach time must not stay invisible for the
@@ -933,6 +998,17 @@ class OpenCodeServiceRuntime(AgentRuntime):
             with suppress(OpenCodeServiceError, OpenCodeServiceUnavailable, OSError, ValueError):
                 self._resolved_directory = await self._resolve_directory(client)
         return client
+
+    def _registration_moved(self) -> bool:
+        """True when `service.json` now points somewhere other than our client."""
+        attached = self._attached_service
+        if attached is None:
+            return False
+        try:
+            current = self._service_reader()
+        except OSError:
+            return False
+        return current is not None and (current.pid != attached.pid or current.url != attached.url)
 
     def _location_params(self) -> dict[str, str]:
         directory = self._resolved_directory or self.directory

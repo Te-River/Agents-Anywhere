@@ -190,12 +190,13 @@ class OpenCodeProvider(RuntimeProvider):
         config: RuntimeConfig,
         host: RuntimeHostClient,
     ) -> AgentRuntime:
-        values = dict(config.values)
-        state_dir = values.get("stateDir")
-        service_reader = (
-            (lambda: read_service(state_dir)) if isinstance(state_dir, str) and state_dir else read_service
+        # The same config-derived reader discovery uses, so a custom `stateDir`
+        # cannot be visible to one and invisible to the other.
+        return OpenCodeServiceRuntime(
+            config=config,
+            host=host,
+            service_reader=provider_config.service_reader(dict(config.values)),
         )
-        return OpenCodeServiceRuntime(config=config, host=host, service_reader=service_reader)
 
     def resource_claims(
         self,

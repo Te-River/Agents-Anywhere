@@ -17,13 +17,14 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from connector.runtimes.opencode import provider_config
 from connector.runtimes.opencode.serve.client import (
     OpenCodeServerClient,
     OpenCodeServiceError,
     OpenCodeServiceUnavailable,
 )
 from connector.runtimes.opencode.serve.runtime import capability_rows
-from connector.runtimes.opencode.serve.service import OpenCodeService, read_service
+from connector.runtimes.opencode.serve.service import OpenCodeService
 
 UNAVAILABLE_REASON = (
     "未检测到 OpenCode 服务：请打开 OpenCode 桌面版，或执行 `opencode serve --service`。"
@@ -44,22 +45,50 @@ def _location(values: Mapping[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _pinned_pid(values: Mapping[str, Any]) -> int | None:
+    pid = values.get("servicePid")
+    return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+
+
 async def discover(
     values: Mapping[str, Any],
     *,
-    service_reader: Callable[[], OpenCodeService | None] = read_service,
+    service_reader: Callable[[], OpenCodeService | None] | None = None,
     client_factory: Callable[[OpenCodeService], OpenCodeServerClient] | None = None,
 ) -> ServiceDiscovery:
-    """Report whether the host service is present and confirms itself."""
+    """Report whether the host service is present and confirms itself.
+
+    The registration is read from the state home this config names -- discovery
+    that looked only at the default home made a custom `stateDir` unreadable here
+    while the runtime could still attach to it.
+    """
     location = _location(values)
     configured = bool(location)
-    service = service_reader()
+    reader = service_reader or provider_config.service_reader(values)
+    service = reader()
     if service is None:
         return ServiceDiscovery(
             available=False,
             configured=configured,
             reason=UNAVAILABLE_REASON,
             metadata={"runtimeCapabilities": {"capabilities": capability_rows(location)}},
+        )
+    pinned = _pinned_pid(values)
+    if pinned is not None and service.pid != pinned:
+        # The pin is the whole point of binding one instance to one process: a
+        # different pid is a different OpenCode, not this one.
+        return ServiceDiscovery(
+            available=False,
+            configured=configured,
+            reason=(
+                f"登记的 OpenCode 服务 pid 是 {service.pid}，与本实例固定的 {pinned} 不符；"
+                "请确认要接入哪一个 OpenCode。"
+            ),
+            metadata={
+                "runtimeCapabilities": {"capabilities": capability_rows(location)},
+                "registeredPid": service.pid,
+                "pinnedPid": pinned,
+            },
         )
     client = (client_factory or (lambda item: OpenCodeServerClient(item)))(service)
     try:
@@ -98,7 +127,7 @@ async def discover(
 async def probe(
     values: Mapping[str, Any],
     *,
-    service_reader: Callable[[], OpenCodeService | None] = read_service,
+    service_reader: Callable[[], OpenCodeService | None] | None = None,
     client_factory: Callable[[OpenCodeService], OpenCodeServerClient] | None = None,
 ) -> ServiceDiscovery:
     """Same question as :func:`discover`, kept separate for the provider's wiring."""

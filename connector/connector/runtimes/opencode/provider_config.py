@@ -28,7 +28,7 @@ def opencode_config_schema() -> dict[str, Any]:
                 "type": "string",
                 "minLength": 1,
                 "title": "OpenCode state directory",
-                "description": "Directory holding OpenCode's `opencode/service.json` registration; defaults to `$XDG_STATE_HOME` (or `~/.local/state`).",
+                "description": "OpenCode's XDG state home; the registration is read at `<stateDir>/opencode/service.json`. Defaults to `$XDG_STATE_HOME` (or `~/.local/state`).",
             },
             "servicePid": {
                 "type": "integer",
@@ -110,20 +110,45 @@ def normalized_config_values(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def registry_dir(values: dict[str, Any]) -> Path:
-    """Directory holding OpenCode's service registration, without creating it.
+    """Directory holding OpenCode's `service.json`, without creating it.
 
-    Follows the ``connector/paths.py`` ``.agents-anywhere`` convention so a
-    self-hosted data directory override keeps working: an explicit ``stateDir``
-    wins, otherwise ``$XDG_STATE_HOME`` (or ``~/.local/state``) as OpenCode itself
-    resolves it.
+    ``stateDir`` is the **XDG state home**, because that is what OpenCode itself
+    resolves: the file lives at ``<state home>/opencode/service.json``. Both
+    branches therefore append ``opencode``; a caller that treats a configured
+    ``stateDir`` as the final directory finds nothing and reports "no service".
+
+    Follows the ``connector/paths.py`` convention so a self-hosted data directory
+    override keeps working: an explicit ``stateDir`` wins, otherwise
+    ``$XDG_STATE_HOME`` (or ``~/.local/state``).
     """
 
     configured = values.get("stateDir")
     if isinstance(configured, str) and configured:
-        return Path(canonical_path(configured))
+        return Path(canonical_path(Path(configured) / "opencode"))
     override = os.environ.get("XDG_STATE_HOME")
     base = Path(override).expanduser() if override else Path.home() / ".local" / "state"
     return Path(canonical_path(base / "opencode"))
+
+
+def state_home(values: dict[str, Any]) -> Path | None:
+    """The state home ``registry_dir`` was derived from, or None for the default."""
+
+    configured = values.get("stateDir")
+    return Path(configured) if isinstance(configured, str) and configured else None
+
+
+def service_reader(values: dict[str, Any]):
+    """A zero-argument registration reader pointed at this config's state home.
+
+    Discovery, configuration probing and the attached runtime must all read the
+    same file; passing ``stateDir`` in only one of them made a custom directory
+    invisible to `provider.discover()` while the runtime could still attach.
+    """
+
+    from connector.runtimes.opencode.serve.service import read_service
+
+    home = state_home(values)
+    return (lambda: read_service(home)) if home is not None else read_service
 
 
 def opencode_capabilities(reported: dict[str, Any] | None = None) -> dict[str, bool]:
