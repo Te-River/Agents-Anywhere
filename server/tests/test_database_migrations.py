@@ -37,6 +37,10 @@ def _sqlite_url(path) -> str:
     return f"sqlite+aiosqlite:///{path}"
 
 
+def _index_names(engine, table: str) -> set[str]:
+    return {index["name"] for index in inspect(engine).get_indexes(table)}
+
+
 def test_protocol_clock_revisions_use_64_bit_columns() -> None:
     assert isinstance(connector_protocol_capabilities.c.revision.type, BigInteger)
     assert isinstance(connector_runtime_catalogs.c.revision.type, BigInteger)
@@ -383,6 +387,12 @@ def test_v2_0_database_upgrades_through_current_revision(tmp_path) -> None:
         ("v2_30", "v2_31"),
         ("v2_31", "v2_32"),
         ("v2_32", "v2_33"),
+        ("v2_33", "v2_34"),
+        ("v2_34", "v2_35"),
+        ("v2_35", "v2_36"),
+        ("v2_36", "v2_37"),
+        ("v2_37", "v2_38"),
+        ("v2_38", "v2_39"),
     ],
 )
 def test_every_adjacent_schema_upgrade(
