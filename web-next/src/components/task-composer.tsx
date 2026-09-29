@@ -278,7 +278,7 @@ export function TaskComposer() {
     ? { runtimeId: selectedRuntime.runtimeId, runtimeType: selectedRuntime.runtimeType }
     : undefined
   const { runtime: agentPresetRuntime, loading: agentPresetsLoading, error: agentPresetsError } = useDshAgentPresets(
-    authSession?.accessToken, selectedConnectorId, selectedAgent, selectedRuntime?.runtimeType === "dsh",
+    authSession?.accessToken, selectedConnectorId, selectedRuntimeId, selectedRuntime?.runtimeType === "dsh",
   )
   const [selectedModel, setSelectedModel] = React.useState("")
   const [selectedReasoning, setSelectedReasoning] = React.useState("")
@@ -650,7 +650,7 @@ export function TaskComposer() {
   const permissionDrawerItems = permissionOptions
   const selectedModelSelection = selectionIdForModelCatalog(modelCatalog, selectedModel, selectedReasoning)
   const selectedPermissionSelection = selectionIdForPermissionCatalog(permissionCatalog, selectedPermissionMode)
-  const agentPresetScope = newSessionSelectionScope(selectedConnectorId, selectedAgent)
+  const agentPresetScope = newSessionSelectionScope(selectedConnectorId, selectedRuntimeId)
   const presetRuntime = agentPresetRuntime ?? selectedRuntime
   const agentPresetOptions = dshAgentPresetOptions(presetRuntime)
   const selectedAgentPreset = dshNewSessionAgentPreset(
