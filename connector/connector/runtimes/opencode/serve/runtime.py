@@ -1016,14 +1016,26 @@ class OpenCodeServiceRuntime(AgentRuntime):
 
     async def _inventory(self, *, force: bool = False) -> tuple[SessionMeta, ...]:
         client = await self._ensure_client()
-        rows = await client.list_sessions(limit=DEFAULT_PAGE_SIZE, **self._location_params())
+        # The host's subagents are its own workers, not Agents Anywhere sessions: a
+        # Team turn measured 19 rows in this location, 15 of them children, and the
+        # parent timeline already carries a `<subagent …>` marker naming each child.
+        # Ask for top-level sessions only, then drop any row that still reports a
+        # parent -- this host is documented to ignore query filters it accepts
+        # (`?directory=` on every catalog), so the filter is intent, not proof.
+        rows = await client.list_sessions(
+            limit=DEFAULT_PAGE_SIZE, parent_id="null", **self._location_params()
+        )
         namespace = self.host.session_namespace
         output: list[SessionMeta] = []
         seen: set[str] = set()
         foreign = 0
+        children = 0
         for row in rows:
             if not self._belongs_to_location(row):
                 foreign += 1
+                continue
+            if isinstance(row.get("parentID"), str) and row["parentID"]:
+                children += 1
                 continue
             meta = mappers.session_meta(row, namespace=namespace)
             if meta.session_id in seen:
@@ -1031,6 +1043,14 @@ class OpenCodeServiceRuntime(AgentRuntime):
             seen.add(meta.session_id)
             self._external_by_session[meta.session_id] = str(meta.external_session_id)
             output.append(meta)
+        if children:
+            # Routine for a host running a Team, so it is not a warning -- but it is
+            # recorded, because it explains an inventory smaller than the host's own
+            # session table (rev3 ruling 1: never drop a filtered count silently).
+            logger.info(
+                "OpenCode inventory left out the host's subagent children",
+                {"count": children, "location": self._resolved_directory or self.directory},
+            )
         if foreign:
             # rev3 ruling 1: `?directory=` is believed only as far as the rows
             # themselves confirm it, and a filtered-out count is reported rather
@@ -1106,8 +1126,9 @@ class OpenCodeServiceRuntime(AgentRuntime):
         self, client: OpenCodeServerClient, external: str, content: str, client_message_id: str | None
     ) -> RuntimeOperationResult:
         body: dict[str, Any] = {"text": content}
-        if client_message_id:
-            body["id"] = client_message_id
+        message_id = _host_message_id(client_message_id)
+        if message_id:
+            body["id"] = message_id
         payload = await client.post(f"/api/session/{external}/prompt", body)
         return RuntimeOperationResult(
             ok=True,
@@ -1138,6 +1159,22 @@ def _selections(row: Mapping[str, Any]) -> dict[str, str | None]:
         if isinstance(model_id, str):
             selections["model"] = f"{provider_id}/{model_id}" if isinstance(provider_id, str) else model_id
     return selections
+
+
+def _host_message_id(client_message_id: str | None) -> str | None:
+    """Put the platform's client message id in the namespace the host accepts.
+
+    `POST …/prompt` refuses any `id` that does not start with `msg_` (measured: a
+    bare UUID is a 400 `Expected a string starting with "msg_"`, while `msg_` plus
+    anything opaque is stored verbatim). The web and desktop clients already mint
+    `msg_<uuid>`; Android mints `opt_<uuid>`, which is why sending from the phone
+    failed while the desktop worked. Forwarding the id is still worth it -- it is
+    what makes a retried send land once -- so the id is namespaced rather than
+    dropped.
+    """
+    if not client_message_id:
+        return None
+    return client_message_id if client_message_id.startswith("msg_") else f"msg_{client_message_id}"
 
 
 def _model_ref(model: str) -> dict[str, str]:

@@ -335,25 +335,33 @@ def test_inventory_rows_from_another_location_are_not_attributed_here() -> None:
         await runtime.start()
         return await runtime.list_complete_session_inventory()
 
-    assert [row.external_session_id for row in run(scenario())] == [EXTERNAL, "ses_child"]
+    assert [row.external_session_id for row in run(scenario())] == [EXTERNAL]
 
 
-def test_inventory_maps_sessions_and_keeps_the_parent_link() -> None:
-    runtime, _ = build(dict(BASE_ROUTES))
+def test_the_inventory_leaves_the_hosts_subagent_children_out() -> None:
+    # A Team turn writes one child session per worker into the same location. They
+    # are the host's internals: surfacing them as Agents Anywhere sessions is what
+    # the user sees as "the subagent became a new chat".
+    runtime, host = build(dict(BASE_ROUTES))
 
     async def scenario() -> Any:
         await runtime.start()
         return await runtime.list_complete_session_inventory()
 
     rows = run(scenario())
-    assert [row.external_session_id for row in rows] == [EXTERNAL, "ses_child"]
-    assert rows[1].metadata["parentID"] == EXTERNAL
+    assert [row.external_session_id for row in rows] == [EXTERNAL]
+    assert ("GET", "/api/session", (("directory", DIRECTORY), ("limit", "100"), ("parentID", "null"))) in host.query
     assert rows[0].session_id.startswith("sess_opencode_")
     assert runtime.supports_complete_session_inventory() is True
 
 
 def test_list_sessions_pages_by_offset_over_the_inventory() -> None:
-    runtime, _ = build(dict(BASE_ROUTES))
+    routes = dict(BASE_ROUTES)
+    routes[("GET", "/api/session")] = [
+        {"id": EXTERNAL, "title": "主会话", "location": {"directory": DIRECTORY}, "time": {"updated": 10}},
+        {"id": "ses_second", "title": "另一个会话", "location": {"directory": DIRECTORY}, "time": {"updated": 20}},
+    ]
+    runtime, _ = build(routes)
 
     async def scenario() -> Any:
         await runtime.start()
@@ -363,7 +371,7 @@ def test_list_sessions_pages_by_offset_over_the_inventory() -> None:
 
     first, second = run(scenario())
     assert [row.external_session_id for row in first] == [EXTERNAL]
-    assert [row.external_session_id for row in second] == ["ses_child"]
+    assert [row.external_session_id for row in second] == ["ses_second"]
 
 
 def test_a_bad_cursor_is_rejected_not_guessed() -> None:
@@ -424,10 +432,24 @@ def test_session_id_is_resolved_through_the_inventory() -> None:
     async def scenario() -> Any:
         await runtime.start()
         rows = await runtime.list_complete_session_inventory()
-        return await runtime.get_session_snapshot(rows[1].session_id)
+        return await runtime.get_session_snapshot(rows[0].session_id)
 
     snapshot = run(scenario())
-    assert snapshot.external_session_id == "ses_child"
+    assert snapshot.external_session_id == EXTERNAL
+    assert ("GET", f"/api/session/{EXTERNAL}/message", None) in host.requests
+
+
+def test_a_subagent_child_is_still_readable_by_its_own_id() -> None:
+    # Excluding children from the inventory must not make them unreadable: the
+    # parent's timeline names each child with a `<subagent sessionID=…>` marker, and
+    # the caller can ask for that session by its external id.
+    runtime, host = build(dict(BASE_ROUTES))
+
+    async def scenario() -> Any:
+        await runtime.start()
+        return await runtime.get_session_snapshot("unused", external_session_id="ses_child")
+
+    assert run(scenario()).external_session_id == "ses_child"
     assert ("GET", "/api/session/ses_child/message", None) in host.requests
 
 
@@ -546,6 +568,22 @@ def test_start_turn_posts_the_prompt_text() -> None:
     result = run(scenario())
     assert result.ok is True
     assert ("POST", f"/api/session/{EXTERNAL}/prompt", {"text": "继续", "id": "msg_client"}) in host.requests
+
+
+def test_a_client_message_id_outside_the_host_namespace_is_namespaced_not_dropped() -> None:
+    # The host answers 400 `Expected a string starting with "msg_"` for any other
+    # id shape, and Android mints `opt_<uuid>`. Dropping the id would silence the
+    # 400 but lose the retry-once guarantee, so it is namespaced.
+    routes = dict(BASE_ROUTES)
+    routes[("POST", f"/api/session/{EXTERNAL}/prompt")] = httpx.Response(200, json={"data": {}})
+    runtime, host = build(routes)
+
+    async def scenario() -> Any:
+        await runtime.start()
+        return await runtime.start_turn("any", EXTERNAL, "继续", client_message_id="opt_3f0d6a2e-7bb1-4d3f")
+
+    assert run(scenario()).ok is True
+    assert ("POST", f"/api/session/{EXTERNAL}/prompt", {"text": "继续", "id": "msg_opt_3f0d6a2e-7bb1-4d3f"}) in host.requests
 
 
 def test_steer_is_unsupported_on_this_transport() -> None:

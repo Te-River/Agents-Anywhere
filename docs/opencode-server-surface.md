@@ -85,6 +85,10 @@ Agents Anywhere 侧对端中转」这一形态决策的判据来源；插件形�
   ⇒ 子会话时间线可读。
 - **限制**：`POST /api/session` 带 `parentID` 会被接受但静默忽略 ⇒ AA 侧**无法主动派生子会话**；
   识别宿主自己派生的子会话没问题。
+- `GET /api/session?parentID=null` 只回顶层会话（2026-09-29 活服务实测：本机 19 条里 15 条带
+  `parentID`，加过滤器后剩 4 条）⇒ AA 的清单**只列顶层会话**：子会话是宿主的内部工人，不是新聊天，
+  而且父会话时间线里本来就有 `<subagent sessionID=…>` 记号指向它们。
+  清单同时本地再滤掉带 `parentID` 的行——这个宿主已被证明会接受却不执行某些查询参数（见 §5 目录面）。
 - `GET /api/session/active` 给出当前活跃会话（实测 1 条）。
 
 ### 4.1 消息与部件形状（活服务真实样本，时间线映射的依据）
@@ -220,7 +224,7 @@ synthetic / system / skill / shell / assistant / compaction / idle`（`idle` 不
 | 端点 | 请求体（`req=` 为必填键） | 备注 |
 | --- | --- | --- |
 | `POST /api/session` | `{id?, title?, agent?, model?:{id,providerID,variant?}, location?:{directory}, metadata?, permissions?}` | **没有 `parentID` 字段** ⇒ 无法主动派生子会话；不写 `location` 就落在宿主默认位置，会从这个实例的清单里消失 |
-| `POST /api/session/{id}/prompt` | `req=[text]`，另有 `id?, files?, agents?, skills?, metadata?, delivery?: steer\|queue, resume?: bool` | 之前记的"`parts` 必填"是错的：必填键是 **`text`**（当时的报错 `Missing key at ["text"]` 说的就是这个）。`delivery:"steer"` ⇒ steer 不是没有，是没有单独端点（见 §9） |
+| `POST /api/session/{id}/prompt` | `req=[text]`，另有 `id?, files?, agents?, skills?, metadata?, delivery?: steer\|queue, resume?: bool` | 之前记的"`parts` 必填"是错的：必填键是 **`text`**（当时的报错 `Missing key at ["text"]` 说的就是这个）。`delivery:"steer"` ⇒ steer 不是没有，是没有单独端点（见 §9）。**`id` 必须以 `msg_` 开头**（2026-09-29 隔离实例实测：不带 `id` ⇒ 宿主自己生成 `msg_…`；`id` 给裸 UUID ⇒ 400 `Expected a string starting with "msg_"`；`msg_` + 任意不透明串（含连字符、80 字符）⇒ 原样存下）——Web/桌面的客户端 id 本就是 `msg_<uuid>`，安卓是 `opt_<uuid>`，所以连接器要把客户端消息 id 归进 `msg_` 命名空间再发，既过校验又保住"重试只落一条" |
 | `POST /api/session/{id}/command` | `req=[name, text]`，可选 `files/agents/skills/delivery` | 字段名是 `name`/`text`，不是 `command`/`arguments` |
 | `POST /api/session/{id}/model` | `req=[model]`，`model=req=[id,providerID]` | 裸 model id 必须拒绝：`id` 跨 provider 重复 |
 | `POST /api/session/{id}/agent` | `req=[agent]` | — |
