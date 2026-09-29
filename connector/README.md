@@ -148,8 +148,10 @@ CLAUDE_BIN=/path/to/claude
 DSH requires the bridge integration described in
 [DSH Bridge Next](../dsh-bridge-next/README.md). OpenCode attaches to the OpenCode
 host's own HTTP service, the same shape as Codex and Claude: OpenCode registers a
-machine-wide service in `$XDG_STATE_HOME/opencode/service.json` (or start one with
-`opencode serve --service`), and the connector joins that endpoint over
+machine-wide service in `$XDG_STATE_HOME/opencode/service.json` (the `stateDir`
+setting overrides that state home, and naming the directory that holds
+`service.json` itself works too; or start one with `opencode serve --service`),
+and the connector joins that endpoint over
 `127.0.0.1` with Basic auth — it never spawns OpenCode and nothing is installed
 inside it. Each runtime instance binds one `(servicePid, location)` pair, so
 `location` scopes the session inventory and is required for complete discovery.
